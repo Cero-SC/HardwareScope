@@ -22,6 +22,8 @@ struct GraphSeries final {
     std::array<wchar_t, 96U> name{};
     std::array<double, kMaximumSamples> samples{};
     std::array<std::uint64_t, kMaximumSamples> timestamps_milliseconds{};
+    std::array<bool, kMaximumSamples> breaks{};
+    bool gap_pending{};
     std::size_t first{};
     std::size_t count{};
     double current{};
@@ -29,6 +31,7 @@ struct GraphSeries final {
 
     [[nodiscard]] double Sample(std::size_t chronological_index) const noexcept;
     [[nodiscard]] std::uint64_t Timestamp(std::size_t chronological_index) const noexcept;
+    [[nodiscard]] bool BreakBefore(std::size_t index) const noexcept { return breaks[(first + index) % breaks.size()]; }
 };
 
 class GraphHistory final {
@@ -43,11 +46,12 @@ public:
     [[nodiscard]] std::size_t SeriesCount() const noexcept { return series_count_; }
     [[nodiscard]] const GraphSeries& Series(std::size_t index) const noexcept { return series_[index]; }
     [[nodiscard]] std::size_t DesiredSampleCount() const noexcept;
-    [[nodiscard]] GraphRange Range() noexcept;
+    [[nodiscard]] GraphRange Range(std::uint32_t view_seconds = 0U) noexcept;
+    [[nodiscard]] std::uint64_t LatestTick() const noexcept { return latest_tick_; }
 
 private:
     [[nodiscard]] GraphRange FixedRange(SensorUnit unit) const noexcept;
-    [[nodiscard]] GraphRange ObservedRange() const noexcept;
+    [[nodiscard]] GraphRange ObservedRange(std::uint32_t view_seconds) const noexcept;
 
     std::array<GraphSeries, kMaximumSeries> series_{};
     std::array<std::uint64_t, kMaximumSeries> configured_ids_{};
@@ -62,6 +66,7 @@ private:
     bool paused_{};
     std::uint64_t last_snapshot_sequence_{};
     std::uint64_t last_sample_tick_{};
+    std::uint64_t latest_tick_{};
 };
 
 [[nodiscard]] const wchar_t* GraphUnitSuffix(SensorUnit unit) noexcept;

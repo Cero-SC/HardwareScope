@@ -13,6 +13,8 @@
 #include <cstdint>
 #include <memory>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
 
 namespace hardwarescope {
 
@@ -54,6 +56,9 @@ public:
     void ConfigureFps(bool enabled, bool game_only, std::uint32_t refresh_interval_ms, std::uint32_t smoothing_interval_ms) noexcept;
     void ConfigureMinMaxReset(bool on_game_launch, std::uint32_t interval_minutes) noexcept;
     void RequestMinMaxReset() noexcept;
+    void ConfigureInterval(std::chrono::milliseconds interval) noexcept;
+    void SetSuspended(bool suspended) noexcept;
+    void RequestStop() noexcept;
     void Stop() noexcept;
     [[nodiscard]] bool Running() const noexcept;
     [[nodiscard]] PrivilegedSensorStatus PrivilegedStatus() const noexcept;
@@ -89,12 +94,20 @@ private:
     StorageTemperatureProvider storage_provider_{};
     std::array<HistoryEntry, kMaxSensors> history_{};
     std::size_t history_count_{};
-    bool fps_enabled_{true};
-    bool fps_game_only_{true};
-    std::uint32_t fps_refresh_interval_ms_{100U};
-    std::uint32_t fps_smoothing_interval_ms_{500U};
-    bool reset_min_max_on_game_launch_{};
-    std::uint32_t reset_min_max_interval_minutes_{};
+    struct Configuration {
+        bool fps_enabled{true};
+        bool fps_game_only{true};
+        std::uint32_t fps_refresh_interval_ms{100U};
+        std::uint32_t fps_smoothing_interval_ms{500U};
+        bool reset_min_max_on_game_launch{};
+        std::uint32_t reset_min_max_interval_minutes{};
+        std::chrono::milliseconds interval{500};
+        bool suspended{};
+        std::uint64_t revision{};
+    };
+    std::mutex configuration_mutex_;
+    std::condition_variable_any configuration_wake_;
+    Configuration configuration_;
     std::unique_ptr<Workspace> workspace_;
 };
 

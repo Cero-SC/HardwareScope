@@ -57,17 +57,39 @@ void GraphHistory::Configure(const AppSettings& settings) noexcept {
 }
 
 void GraphHistory::Update(const SensorSnapshot& snapshot, const std::uint64_t tick_milliseconds) noexcept {
-    if (paused_ || series_count_ == 0U || snapshot.sequence == 0U || snapshot.sequence == last_snapshot_sequence_) return;
+    if (paused_ || series_count_ == 0U) return;
+    latest_tick_ = tick_milliseconds;
+    for (auto& series : series_) {
+        while (series.count != 0U && tick_milliseconds >= series.Timestamp(0U)
+            && tick_milliseconds - series.Timestamp(0U) >= static_cast<std::uint64_t>(history_seconds_) * 1'000U) {
+            series.first = (series.first + 1U) % series.samples.size();
+            --series.count;
+        }
+    }
+    if (snapshot.sequence == 0U || snapshot.sequence == last_snapshot_sequence_) return;
     last_snapshot_sequence_ = snapshot.sequence;
     if (last_sample_tick_ != 0U && tick_milliseconds - last_sample_tick_ < refresh_milliseconds_) return;
     last_sample_tick_ = tick_milliseconds;
-    const auto desired = DesiredSampleCount();
+    const auto desired = GraphSeries::kMaximumSamples;
+    const auto* reference = FindSensor(snapshot, configured_ids_[0]);
 
     for (std::size_t index{}; index < series_count_; ++index) {
         auto& series = series_[index];
         const auto* sensor = FindSensor(snapshot, configured_ids_[index]);
         if (sensor == nullptr || !sensor->available || !std::isfinite(sensor->current)) {
             series.available = false;
+            series.gap_pending = true;
+            continue;
+        }
+        if (reference == nullptr) {
+            // The reference may be omitted on a failed provider refresh. Keep
+            // sibling history until its unit can be checked again, with a gap.
+            series.available = false;
+            series.gap_pending = true;
+            continue;
+        }
+        if (sensor->unit != reference->unit) {
+            series = {}; // imported IDs cannot bypass the same-unit graph contract
             continue;
         }
         if (series.sensor_id != sensor->id) {
@@ -85,6 +107,8 @@ void GraphHistory::Update(const SensorSnapshot& snapshot, const std::uint64_t ti
         const auto insert = (series.first + series.count) % series.samples.size();
         series.samples[insert] = sensor->current;
         series.timestamps_milliseconds[insert] = tick_milliseconds;
+        series.breaks[insert] = series.gap_pending;
+        series.gap_pending = false;
         ++series.count;
     }
 }
@@ -93,6 +117,7 @@ void GraphHistory::Clear() noexcept {
     series_ = {};
     last_snapshot_sequence_ = 0U;
     last_sample_tick_ = 0U;
+    latest_tick_ = 0U;
     adaptive_initialized_ = false;
 }
 
@@ -116,12 +141,14 @@ GraphRange GraphHistory::FixedRange(const SensorUnit unit) const noexcept {
     return {0.0, 100.0};
 }
 
-GraphRange GraphHistory::ObservedRange() const noexcept {
+GraphRange GraphHistory::ObservedRange(const std::uint32_t view_seconds) const noexcept {
     auto minimum = std::numeric_limits<double>::infinity();
     auto maximum = -std::numeric_limits<double>::infinity();
     for (std::size_t series_index{}; series_index < series_count_; ++series_index) {
         const auto& series = series_[series_index];
         for (std::size_t sample{}; sample < series.count; ++sample) {
+            if (latest_tick_ >= series.Timestamp(sample)
+                && latest_tick_ - series.Timestamp(sample) > static_cast<std::uint64_t>(view_seconds) * 1'000U) continue;
             const auto value = series.Sample(sample);
             minimum = std::min(minimum, value);
             maximum = std::max(maximum, value);
@@ -130,7 +157,7 @@ GraphRange GraphHistory::ObservedRange() const noexcept {
     return std::isfinite(minimum) && std::isfinite(maximum) ? Padded(minimum, maximum) : GraphRange{0.0, 100.0};
 }
 
-GraphRange GraphHistory::Range() noexcept {
+GraphRange GraphHistory::Range(const std::uint32_t view_seconds) noexcept {
     if (scale_mode_ == GraphScaleMode::custom) return {custom_minimum_, custom_maximum_};
     SensorUnit unit = SensorUnit::percent;
     for (std::size_t index{}; index < series_count_; ++index) {
@@ -141,7 +168,7 @@ GraphRange GraphHistory::Range() noexcept {
     }
     if (scale_mode_ == GraphScaleMode::fixed) return FixedRange(unit);
 
-    const auto observed = ObservedRange();
+    const auto observed = ObservedRange(view_seconds == 0U ? history_seconds_ : view_seconds);
     if (!adaptive_initialized_) {
         adaptive_range_ = observed;
         adaptive_initialized_ = true;

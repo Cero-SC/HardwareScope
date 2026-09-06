@@ -9,6 +9,9 @@
 
 namespace hardwarescope {
 
+void AppendAmdZenTemperatures(SensorSnapshot& snapshot, const AmdZenTemperatures& temperatures,
+    const wchar_t* hardware) noexcept;
+
 class PrivilegedSensorCollector final {
 public:
     PrivilegedSensorCollector() = default;

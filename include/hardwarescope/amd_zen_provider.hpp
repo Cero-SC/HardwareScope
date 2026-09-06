@@ -13,6 +13,7 @@ namespace hardwarescope {
 
 struct AmdZenTemperatures final {
     double package_celsius{};
+    // Physical CCD slots, never compacted. Zero means unavailable, not 0 degrees.
     std::array<double, 8> ccd_celsius{};
     std::size_t ccd_count{};
 };

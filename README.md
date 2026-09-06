@@ -76,6 +76,8 @@ motherboard and DDR5 temperature access. It checks existing installations and
 does not remove the shared driver when HardwareScope is uninstalled.
 Some hardware remains unsupported; installing the driver does not add sensor
 support for every CPU or motherboard.
+See the [native support and qualification matrix](docs/SUPPORT_MATRIX.md) for
+implemented boundaries, game/OSD limitations, and areas still needing validation.
 
 The portable ZIP includes PawnIO Setup under `prerequisites/`. It requires
 manual prerequisite installation and elevation for direct privileged sensors;

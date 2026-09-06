@@ -19,12 +19,13 @@ std::optional<std::uint64_t> Number(const std::wstring_view text) noexcept {
 }
 
 bool Relaunch(const std::filesystem::path& application) noexcept {
+    const auto directory = application.parent_path();
     SHELLEXECUTEINFOW launch{};
     launch.cbSize = sizeof(launch);
     launch.fMask = SEE_MASK_FLAG_NO_UI;
     launch.lpVerb = L"open";
     launch.lpFile = application.c_str();
-    launch.lpDirectory = application.parent_path().c_str();
+    launch.lpDirectory = directory.c_str();
     launch.nShow = SW_SHOWNORMAL;
     return ShellExecuteExW(&launch) != FALSE;
 }
@@ -74,13 +75,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     hardwarescope::VerifiedFile verified_installer;
     if (!verified_installer.Open(installer, *size, hash)) return 14;
 
+    const auto installer_directory = installer.parent_path();
     SHELLEXECUTEINFOW setup{};
     setup.cbSize = sizeof(setup);
     setup.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
     setup.lpVerb = L"runas";
     setup.lpFile = installer.c_str();
     setup.lpParameters = L"/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS";
-    setup.lpDirectory = installer.parent_path().c_str();
+    setup.lpDirectory = installer_directory.c_str();
     setup.nShow = SW_SHOWNORMAL;
     if (!ShellExecuteExW(&setup) || setup.hProcess == nullptr) return 15;
     const auto setup_wait = WaitForSingleObject(setup.hProcess, INFINITE);

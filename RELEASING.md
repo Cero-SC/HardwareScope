@@ -11,10 +11,35 @@ the release assets.
 3. Create and push the matching tag, for example `v2.0.0`.
 4. The **Build and publish release** workflow builds and tests the Windows x64
    application, installer, portable ZIP, and checksums.
-5. The workflow publishes those files as the GitHub release assets.
-6. The **Publish verified update manifest** workflow downloads the public
+5. The workflow uploads those files to a **draft candidate**, not an advertised
+   stable release. Download and qualify those exact bytes. Do not rebuild between
+   qualification and promotion.
+6. Record the candidate source commit, installer SHA-256, machine/Windows/driver
+   details and evidence for deterministic tests, production UI, a real older-version
+   upgrade, installer failure recovery, FPS, reference hardware, and a five-minute
+   resource check. Run `tests/validate_release_evidence.ps1` against that record
+   and installer. Review the referenced evidence; the validator checks the record,
+   not the truth of a manually entered result. Only then may the maintainer promote
+   the same draft assets to a public stable release. Keep the portable ZIP and its
+   checksums in the same reviewed candidate.
+7. The **Publish verified update manifest** workflow downloads the public
    installer, verifies its name, size, URL, and SHA-256 checksum, then commits
    the new `updates/latest.json` to `main`.
+
+Promotion is a maintainer gate, not a claim that GitHub branch protection is
+already configured. Required reviews/status checks and release permissions must
+be configured by the repository owner before broad distribution. An older or
+duplicate release event cannot regress or rewrite the stable manifest. A failed
+push caused by concurrent main changes must be rerun against fresh main.
+
+`clean_install_validation.ps1` without `-PreviousInstallerPath` verifies clean
+installation and same-version reinstall only. Supply a strictly older native
+installer for the historical-upgrade test. These destructive tests are restricted
+to disposable hosted Windows runners; never run them on the developer's installed PC.
+
+For a failed release, retain the known-good manifest and prefer a forward repair
+version. Do not replace existing public asset bytes or lower the normal stable
+version to perform an undocumented rollback.
 
 Never point `updates/latest.json` at a draft, local file, or asset that has not
 been downloaded and verified from the public GitHub release.

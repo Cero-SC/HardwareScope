@@ -249,7 +249,13 @@ bool SettingsStore::Load(AppSettings& destination) const noexcept {
     try {
         std::ifstream stream(path_, std::ios::binary);
         if (!stream) return false;
-        const std::string text{std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
+        // Read at most the cap plus one byte: a size check alone races a growing file.
+        constexpr std::size_t maximum_bytes = 256U * 1024U;
+        std::string text(maximum_bytes + 1U, '\0');
+        stream.read(text.data(), static_cast<std::streamsize>(text.size()));
+        const auto bytes = static_cast<std::size_t>(stream.gcount());
+        if (stream.bad() || bytes > maximum_bytes) return false;
+        text.resize(bytes);
         const auto values = Parse(text);
         const auto schema_version = IntegerValue<std::uint32_t>(values, "schema_version", 0U);
         if (schema_version == 0U || schema_version > AppSettings::kSchemaVersion) return false;
@@ -331,6 +337,7 @@ bool SettingsStore::Load(AppSettings& destination) const noexcept {
         loaded.collapsed_sections = IntegerValue(values, "collapsed_sections", loaded.collapsed_sections);
         loaded.favorites_only = BooleanValue(values, "favorites_only", loaded.easy_temperature_enabled);
         loaded.favorites_initialized = BooleanValue(values, "favorites_initialized", false);
+        loaded.favorite_defaults_completed_mask = IntegerValue<std::uint32_t>(values, "favorite_defaults_completed_mask", 0U) & 7U;
         loaded.favorite_sensor_ids = ParseSensorIds<AppSettings::kMaximumFavoriteSensors>(values, "favorite_sensor_ids", loaded.favorite_sensor_count);
         loaded.pinned_sensor_ids = ParseSensorIds<AppSettings::kMaximumPinnedSensors>(values, "pinned_sensor_ids", loaded.pinned_sensor_count);
         loaded.osd_sensor_order_ids = ParseSensorIds<AppSettings::kMaximumOsdOrderSensors>(values, "osd_sensor_order_ids", loaded.osd_sensor_order_count);
@@ -349,7 +356,7 @@ bool SettingsStore::Save(const AppSettings& settings) const noexcept {
         const auto parent = path_.parent_path();
         if (!parent.empty()) std::filesystem::create_directories(parent);
         auto temporary = path_;
-        temporary += L".tmp";
+        temporary += L".tmp." + std::to_wstring(GetCurrentProcessId()) + L"." + std::to_wstring(GetCurrentThreadId());
 
         std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
         if (!stream) return false;
@@ -429,6 +436,7 @@ bool SettingsStore::Save(const AppSettings& settings) const noexcept {
         stream << "collapsed_sections=" << normalized.collapsed_sections << '\n';
         WriteBoolean(stream, "favorites_only", normalized.favorites_only);
         WriteBoolean(stream, "favorites_initialized", normalized.favorites_initialized);
+        stream << "favorite_defaults_completed_mask=" << normalized.favorite_defaults_completed_mask << '\n';
         stream << "favorite_sensor_ids=";
         for (std::uint32_t index = 0; index < normalized.favorite_sensor_count; ++index) {
             if (index != 0U) stream << ',';
@@ -458,6 +466,36 @@ bool SettingsStore::Save(const AppSettings& settings) const noexcept {
         return true;
     } catch (...) {
         return false;
+    }
+}
+
+AsyncSettingsWriter::AsyncSettingsWriter(std::filesystem::path path)
+    : store_(std::move(path)), thread_([this](const std::stop_token stop) { Run(stop); }) {}
+
+AsyncSettingsWriter::~AsyncSettingsWriter() {
+    thread_.request_stop();
+    wake_.notify_all();
+    if (thread_.joinable()) thread_.join(); // flush the final value after the window closes
+}
+
+void AsyncSettingsWriter::Request(const AppSettings& settings) noexcept {
+    const std::scoped_lock lock(mutex_);
+    pending_ = settings;
+    ++requested_;
+    wake_.notify_one();
+}
+
+void AsyncSettingsWriter::Run(const std::stop_token stop) {
+    for (;;) {
+        std::unique_lock lock(mutex_);
+        wake_.wait(lock, stop, [this] { return pending_.has_value(); });
+        if (!pending_) return;
+        const auto value = *pending_;
+        const auto revision = requested_.load();
+        pending_.reset();
+        lock.unlock();
+        failed_.store(!store_.Save(value));
+        completed_.store(revision);
     }
 }
 

@@ -19,6 +19,9 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <atomic>
+#include <memory>
+#include <thread>
 
 namespace hardwarescope {
 namespace {
@@ -33,6 +36,14 @@ constexpr int kLogicalContentWidth = 650;
 constexpr int kLogicalContentHeight = 650;
 constexpr int kOsdPreviewControl = 21;
 constexpr int kOsdOrderListControl = 22;
+constexpr UINT_PTR kSettingsTransferTimer = 0x48535452U;
+
+struct SettingsTransfer final {
+    AppSettings settings;
+    bool exporting{};
+    bool success{};
+    std::atomic<bool> done{};
+};
 
 COLORREF WinColor(const std::uint32_t rgb) noexcept {
     return RGB((rgb >> 16U) & 0xFFU, (rgb >> 8U) & 0xFFU, rgb & 0xFFU);
@@ -85,6 +96,7 @@ struct DialogState final {
     HWND check_updates{};
     HWND export_settings{};
     HWND import_settings{};
+    std::shared_ptr<SettingsTransfer> transfer;
     HWND show_osd{};
     HWND position{};
     HWND layout{};
@@ -1314,6 +1326,29 @@ void PreviewPalette(DialogState& state) noexcept {
     RedrawWindow(state.window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME);
 }
 
+void StartSettingsTransfer(DialogState& state, const std::filesystem::path& path, const bool exporting) noexcept {
+    if (state.transfer) return;
+    try {
+        auto job = std::make_shared<SettingsTransfer>();
+        job->settings = state.draft;
+        job->exporting = exporting;
+        // The worker owns only a copied path and independent result, never the
+        // dialog or HWND. Closing the dialog during I/O cannot dangle a callback.
+        std::thread([job, path] {
+            const SettingsStore store(path);
+            job->success = job->exporting ? store.Save(job->settings) : store.Load(job->settings);
+            job->done.store(true, std::memory_order_release);
+        }).detach();
+        state.transfer = std::move(job);
+        EnableWindow(state.import_settings, FALSE);
+        EnableWindow(state.export_settings, FALSE);
+        EnableWindow(GetDlgItem(state.window, kSave), FALSE);
+        SetTimer(state.window, kSettingsTransferTimer, 100U, nullptr);
+    } catch (...) {
+        MessageBoxW(state.window, L"Could not start the settings file operation.", L"Settings", MB_OK | MB_ICONWARNING);
+    }
+}
+
 LRESULT CALLBACK WindowProcedure(const HWND window, const UINT message, const WPARAM wparam, const LPARAM lparam) noexcept {
     auto* state = reinterpret_cast<DialogState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
     if (message == WM_NCCREATE) {
@@ -1392,6 +1427,25 @@ LRESULT CALLBACK WindowProcedure(const HWND window, const UINT message, const WP
         HandleScroll(*state, SB_VERT, MAKEWPARAM(GET_WHEEL_DELTA_WPARAM(wparam) > 0 ? SB_LINEUP : SB_LINEDOWN, 0), lines);
         return 0;
     }
+    case WM_TIMER:
+        if (wparam == kSettingsTransferTimer && state->transfer && state->transfer->done.load(std::memory_order_acquire)) {
+            KillTimer(window, kSettingsTransferTimer);
+            const auto job = std::move(state->transfer);
+            EnableWindow(state->import_settings, TRUE);
+            EnableWindow(state->export_settings, TRUE);
+            EnableWindow(GetDlgItem(window, kSave), TRUE);
+            if (job->success && !job->exporting) {
+                state->draft = job->settings;
+                state->draft.onboarding_completed = true;
+                ApplyDraftToControls(*state);
+                PreviewPalette(*state);
+            }
+            MessageBoxW(window, job->success
+                ? (job->exporting ? L"Settings exported successfully." : L"Settings imported. Review them, then choose Save settings to apply.")
+                : L"Could not read or write the settings file. Imports must be supported HardwareScope files no larger than 256 KiB.",
+                L"Settings", MB_OK | (job->success ? MB_ICONINFORMATION : MB_ICONWARNING));
+        }
+        return 0;
     case WM_COMMAND:
         if (LOWORD(wparam) == kSettingsResetMinMaxCommand) {
             static_cast<void>(SendMessageW(state->owner, WM_COMMAND, kCommandResetMinMax, 0));
@@ -1432,31 +1486,17 @@ LRESULT CALLBACK WindowProcedure(const HWND window, const UINT message, const WP
             return 0;
         }
         if (LOWORD(wparam) == kSettingsExportCommand) {
+            if (state->transfer) return 0;
             if (const auto path = SelectSettingsPath(window, true)) {
                 ReadControls(*state);
-                const SettingsStore destination{*path};
-                const auto saved = destination.Save(state->draft);
-                MessageBoxW(
-                    window,
-                    saved ? L"Settings exported successfully." : L"HardwareScope could not write the selected file.",
-                    L"Export settings",
-                    MB_OK | (saved ? MB_ICONINFORMATION : MB_ICONWARNING));
+                StartSettingsTransfer(*state, *path, true);
             }
             return 0;
         }
         if (LOWORD(wparam) == kSettingsImportCommand) {
+            if (state->transfer) return 0;
             if (const auto path = SelectSettingsPath(window, false)) {
-                AppSettings imported{};
-                const SettingsStore source{*path};
-                if (!source.Load(imported)) {
-                    MessageBoxW(window, L"This is not a valid or supported HardwareScope settings file.", L"Import settings", MB_OK | MB_ICONWARNING);
-                    return 0;
-                }
-                imported.onboarding_completed = true;
-                state->draft = imported;
-                ApplyDraftToControls(*state);
-                PreviewPalette(*state);
-                MessageBoxW(window, L"Settings imported. Review them, then choose Save settings to apply.", L"Import settings", MB_OK | MB_ICONINFORMATION);
+                StartSettingsTransfer(*state, *path, false);
             }
             return 0;
         }
@@ -1468,6 +1508,7 @@ LRESULT CALLBACK WindowProcedure(const HWND window, const UINT message, const WP
             return 0;
         }
         if (LOWORD(wparam) == kSave) {
+            if (state->transfer) return 0;
             ReadControls(*state);
             state->saved = true;
             state->done = true;

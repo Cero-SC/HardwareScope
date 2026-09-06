@@ -50,14 +50,27 @@ std::wstring ProcessName(const std::uint32_t process_id) {
     return value.filename().wstring();
 }
 
-std::vector<std::string_view> Columns(const std::string_view line) {
-    std::vector<std::string_view> result;
+struct CsvColumns {
+    std::array<std::string_view, 64> values{};
+    std::size_t count{};
+    std::size_t size() const noexcept { return count; }
+    std::string_view operator[](std::size_t index) const noexcept { return values[index]; }
+};
+
+CsvColumns Columns(const std::string_view line) noexcept {
+    CsvColumns result;
     std::size_t begin{};
-    while (begin <= line.size()) {
-        const auto comma = line.find(',', begin);
-        result.push_back(line.substr(begin, comma == std::string_view::npos ? line.size() - begin : comma - begin));
-        if (comma == std::string_view::npos) break;
-        begin = comma + 1U;
+    bool quoted{};
+    for (std::size_t index{}; index <= line.size(); ++index) {
+        if (index < line.size() && line[index] == '"') quoted = !quoted;
+        if (index != line.size() && (line[index] != ',' || quoted)) continue;
+        if (quoted || result.count == result.values.size()) return {};
+        auto value = line.substr(begin, index - begin);
+        if (value.size() >= 2U && value.front() == '"' && value.back() == '"') {
+            value.remove_prefix(1U); value.remove_suffix(1U);
+        }
+        result.values[result.count++] = value;
+        begin = index + 1U;
     }
     return result;
 }
@@ -79,6 +92,58 @@ double Number(const std::string_view text) noexcept {
 }
 
 } // namespace
+
+std::optional<PresentMonCsvSample> PresentMonCsvStream::Consume(
+    const std::string_view line, const std::uint32_t process_id, const std::uint64_t now) noexcept {
+    const auto columns = Columns(line);
+    if (interval_column_ == std::string_view::npos) {
+        for (std::size_t index{}; index < columns.size(); ++index) {
+            if (EqualsInsensitive(columns[index], "MsBetweenPresents")) interval_column_ = index;
+            if (EqualsInsensitive(columns[index], "ProcessID")) process_column_ = index;
+            if (EqualsInsensitive(columns[index], "SwapChainAddress")) chain_column_ = index;
+        }
+        if (process_column_ == std::string_view::npos || chain_column_ == std::string_view::npos)
+            interval_column_ = std::string_view::npos;
+        return std::nullopt;
+    }
+    if (std::max({interval_column_, process_column_, chain_column_}) >= columns.size()) return std::nullopt;
+    if (Number(columns[process_column_]) != static_cast<double>(process_id)) return std::nullopt;
+    const auto milliseconds = Number(columns[interval_column_]);
+    // Keep real hitches. Intervals exceeding the entire 60s history are capture
+    // discontinuities and reset the stream rather than silently bias its lows.
+    if (!std::isfinite(milliseconds) || milliseconds <= 0.05) return std::nullopt;
+    auto chain_text = columns[chain_column_];
+    int base = 10;
+    if (chain_text.starts_with("0x") || chain_text.starts_with("0X")) { chain_text.remove_prefix(2); base = 16; }
+    std::uint64_t chain{};
+    const auto parsed = std::from_chars(chain_text.data(), chain_text.data() + chain_text.size(), chain, base);
+    if (parsed.ec != std::errc{} || parsed.ptr != chain_text.data() + chain_text.size() || chain == 0U) return std::nullopt;
+    if (milliseconds > 60'000.0) {
+        if (chain == selected_) reset_pending_ = true;
+        return std::nullopt;
+    }
+    if (selected_ == 0U) { selected_ = chain; window_tick_ = now; }
+    for (auto& stream : streams_) {
+        if (stream.id == chain || stream.id == 0U) { stream.id = chain; ++stream.count; break; }
+    }
+    if (now - window_tick_ >= 1'000U) {
+        const auto best = std::max_element(streams_.begin(), streams_.end(), [](const Stream& a, const Stream& b) { return a.count < b.count; });
+        const auto active = std::find_if(streams_.begin(), streams_.end(), [this](const Stream& s) { return s.id == selected_; });
+        const auto active_count = active == streams_.end() ? 0U : active->count;
+        if (best->id != 0U && best->id != selected_ && best->count > active_count * 2U) {
+            selected_ = best->id; reset_pending_ = true;
+        }
+        streams_ = {}; window_tick_ = now;
+    }
+    if (chain != selected_) {
+        if (now - last_selected_tick_ <= 2'500U) return std::nullopt;
+        selected_ = chain; reset_pending_ = true;
+    }
+    last_selected_tick_ = now;
+    const auto reset = reset_pending_;
+    reset_pending_ = false;
+    return PresentMonCsvSample{milliseconds, reset};
+}
 
 std::uint32_t CalculateOnePercentLowFps(double* const intervals, const std::size_t count) noexcept {
     if (intervals == nullptr || count < 100U) return 0U;
@@ -178,7 +243,7 @@ void PresentMonFpsRunner::ReadOutput(const std::stop_token token, const HANDLE p
     pending.reserve(16U * 1024U);
     raw_pending.reserve(16U * 1024U);
     std::array<char, 8U * 1024U> buffer{};
-    std::size_t interval_column = std::string_view::npos;
+    PresentMonCsvStream csv;
     enum class StreamEncoding : std::uint8_t { unknown, narrow, utf16_little_endian };
     auto encoding = StreamEncoding::unknown;
     while (!token.stop_requested()) {
@@ -214,27 +279,25 @@ void PresentMonFpsRunner::ReadOutput(const std::stop_token token, const HANDLE p
         while ((newline = pending.find('\n')) != std::string::npos) {
             auto line = std::string_view{pending.data(), newline};
             if (!line.empty() && line.back() == '\r') line.remove_suffix(1U);
-            const auto columns = Columns(line);
-            if (interval_column == std::string_view::npos) {
-                for (std::size_t index{}; index < columns.size(); ++index) {
-                    if (EqualsInsensitive(columns[index], "MsBetweenPresents") || EqualsInsensitive(columns[index], "msBetweenPresents")) {
-                        interval_column = index;
-                        break;
-                    }
-                }
-            } else if (interval_column < columns.size()) {
-                RecordInterval(Number(columns[interval_column]), process_id);
-            }
+            if (const auto sample = csv.Consume(line, process_id, GetTickCount64()))
+                RecordInterval(sample->milliseconds, process_id, sample->new_stream);
             pending.erase(0U, newline + 1U);
         }
+        if (pending.size() > 64U * 1024U) break; // bounded malformed/unterminated line
     }
     if (diagnostic != INVALID_HANDLE_VALUE) CloseHandle(diagnostic);
 }
 
-void PresentMonFpsRunner::RecordInterval(const double milliseconds, const std::uint32_t process_id) noexcept {
-    if (!std::isfinite(milliseconds) || milliseconds <= 0.05 || milliseconds > 1'000.0
+void PresentMonFpsRunner::RecordInterval(const double milliseconds, const std::uint32_t process_id, const bool new_stream) noexcept {
+    if (!std::isfinite(milliseconds) || milliseconds <= 0.05 || milliseconds > kHistoryMilliseconds
         || process_id != target_process_id_.load(std::memory_order_acquire)) return;
     const std::scoped_lock lock(mutex_);
+    if (new_stream) {
+        interval_first_ = interval_count_ = 0U;
+        interval_total_ = 0.0;
+        cached_one_percent_low_ = 0U;
+        last_percentile_tick_ = 0U;
+    }
     if (interval_count_ == intervals_.size()) {
         interval_total_ -= intervals_[interval_first_];
         interval_first_ = (interval_first_ + 1U) % intervals_.size();
@@ -286,11 +349,10 @@ PresentMonFpsReading PresentMonFpsRunner::Snapshot() const noexcept {
             }
             last_percentile_tick_ = now;
         }
-    }
-    if (percentile_count != 0U) {
-        const auto low = CalculateOnePercentLowFps(percentile_scratch_.data(), percentile_count);
-        const std::scoped_lock lock(mutex_);
-        if (reading.process_id == target_process_id_.load(std::memory_order_acquire)) {
+        if (percentile_count != 0U) {
+            // Once per second, bounded to kMaximumIntervals. Serialize scratch
+            // and result publication with stream resets, not only PID changes.
+            const auto low = CalculateOnePercentLowFps(percentile_scratch_.data(), percentile_count);
             cached_one_percent_low_ = low;
             reading.one_percent_low_frames_per_second = low;
         }

@@ -41,8 +41,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, const int show_command
         return 0;
     }
 
-    const std::unique_ptr<hardwarescope::NativeWindow> application(new (std::nothrow) hardwarescope::NativeWindow(instance));
+    std::unique_ptr<hardwarescope::NativeWindow> application(new (std::nothrow) hardwarescope::NativeWindow(instance));
     const auto result = application != nullptr ? application->Run(show_command) : 3;
+    // Flush background settings and destroy COM resources while the instance
+    // mutex and COM apartment still belong to this process.
+    application.reset();
 
     ReleaseMutex(mutex);
     CloseHandle(mutex);

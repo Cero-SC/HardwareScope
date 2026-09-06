@@ -4,6 +4,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <optional>
+#include <thread>
 
 namespace hardwarescope {
 
@@ -122,6 +127,7 @@ struct AppSettings final {
 
     bool favorites_only{true};
     bool favorites_initialized{};
+    std::uint32_t favorite_defaults_completed_mask{};
     std::array<std::uint64_t, kMaximumFavoriteSensors> favorite_sensor_ids{};
     std::uint32_t favorite_sensor_count{};
 
@@ -150,6 +156,26 @@ public:
 
 private:
     std::filesystem::path path_;
+};
+
+// One bounded latest-value slot, one dormant worker; no per-click threads/queues.
+class AsyncSettingsWriter final {
+public:
+    explicit AsyncSettingsWriter(std::filesystem::path path);
+    ~AsyncSettingsWriter();
+    void Request(const AppSettings& settings) noexcept;
+    [[nodiscard]] bool Pending() const noexcept { return requested_.load() != completed_.load(); }
+    [[nodiscard]] bool TakeFailure() noexcept { return failed_.exchange(false); }
+private:
+    void Run(std::stop_token stop);
+    SettingsStore store_;
+    std::mutex mutex_;
+    std::condition_variable_any wake_;
+    std::optional<AppSettings> pending_;
+    std::atomic<std::uint64_t> requested_{};
+    std::atomic<std::uint64_t> completed_{};
+    std::atomic<bool> failed_{};
+    std::jthread thread_;
 };
 
 } // namespace hardwarescope

@@ -28,6 +28,7 @@ struct Work final {
     HWND window{};
     bool automatic{};
     std::optional<SemanticVersion> skipped_version;
+    std::optional<UpdateManifest> download;
 };
 
 unsigned __stdcall CheckThread(void* const parameter) noexcept {
@@ -35,29 +36,34 @@ unsigned __stdcall CheckThread(void* const parameter) noexcept {
     auto& state = SharedState();
     UpdateCompletion completion{};
     completion.automatic = work->automatic;
-    auto check = CheckStableUpdate(SemanticVersion{
-        HARDWARESCOPE_VERSION_MAJOR,
-        HARDWARESCOPE_VERSION_MINOR,
-        HARDWARESCOPE_VERSION_PATCH});
-    completion.system_error = check.system_error;
-    if (check.status == UpdateCheckStatus::current) {
-        completion.status = UpdateCompletionStatus::current;
-    } else if (check.status == UpdateCheckStatus::available
-        && work->automatic
-        && work->skipped_version
-        && check.manifest.version == *work->skipped_version) {
-        completion.status = UpdateCompletionStatus::current;
-    } else if (check.status == UpdateCheckStatus::available) {
-        const auto installer = DownloadVerifiedInstaller(check.manifest);
+    if (work->download) {
+        completion.manifest = *work->download;
+        const auto installer = DownloadVerifiedInstaller(completion.manifest);
         if (installer) {
             completion.status = UpdateCompletionStatus::ready;
-            completion.installer = std::move(*installer);
+            completion.installer = *installer;
         } else {
             completion.status = UpdateCompletionStatus::failed;
             completion.system_error = ERROR_CRC;
         }
+    } else {
+        auto check = CheckStableUpdate(SemanticVersion{
+            HARDWARESCOPE_VERSION_MAJOR,
+            HARDWARESCOPE_VERSION_MINOR,
+            HARDWARESCOPE_VERSION_PATCH});
+        completion.system_error = check.system_error;
+        if (check.status == UpdateCheckStatus::current) {
+            completion.status = UpdateCompletionStatus::current;
+        } else if (check.status == UpdateCheckStatus::available
+            && work->automatic
+            && work->skipped_version
+            && check.manifest.version == *work->skipped_version) {
+            completion.status = UpdateCompletionStatus::current;
+        } else if (check.status == UpdateCheckStatus::available) {
+            completion.status = UpdateCompletionStatus::available;
+        }
+        completion.manifest = std::move(check.manifest);
     }
-    completion.manifest = std::move(check.manifest);
     {
         const std::scoped_lock lock(state.completion_mutex);
         state.pending_completion = std::move(completion);
@@ -72,19 +78,28 @@ unsigned __stdcall CheckThread(void* const parameter) noexcept {
 
 } // namespace
 
-bool BeginNativeUpdateCheck(
+static bool BeginWork(
     const HWND notification_window,
     const bool automatic,
-    std::optional<SemanticVersion> skipped_version) noexcept {
+    std::optional<SemanticVersion> skipped_version,
+    std::optional<UpdateManifest> download) noexcept {
     if (notification_window == nullptr) return false;
     auto& state = SharedState();
     bool expected{};
     if (!state.update_in_progress.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return false;
     try {
+        {
+            const std::scoped_lock lock(state.completion_mutex);
+            if (state.pending_completion) {
+                state.update_in_progress.store(false, std::memory_order_release);
+                return false; // UI must consume the previous result before another operation
+            }
+        }
         auto work = std::make_unique<Work>();
         work->window = notification_window;
         work->automatic = automatic;
         work->skipped_version = std::move(skipped_version);
+        work->download = std::move(download);
         const auto thread = reinterpret_cast<HANDLE>(_beginthreadex(nullptr, 0U, &CheckThread, work.get(), 0U, nullptr));
         if (thread == nullptr) {
             state.update_in_progress.store(false, std::memory_order_release);
@@ -97,6 +112,14 @@ bool BeginNativeUpdateCheck(
         state.update_in_progress.store(false, std::memory_order_release);
         return false;
     }
+}
+
+bool BeginNativeUpdateCheck(HWND window, bool automatic, std::optional<SemanticVersion> skipped) noexcept {
+    return BeginWork(window, automatic, std::move(skipped), std::nullopt);
+}
+
+bool BeginNativeUpdateDownload(HWND window, UpdateManifest manifest) noexcept {
+    return BeginWork(window, false, std::nullopt, std::move(manifest));
 }
 
 std::optional<UpdateCompletion> TakeNativeUpdateCompletion() noexcept {

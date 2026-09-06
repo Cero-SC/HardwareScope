@@ -42,8 +42,18 @@ jobs:
           fi
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          CURRENT="$(jq -r .version updates/latest.json)"
+          INCOMING="${TAG#v}"
+          # Numeric semantic comparison; duplicate or older events are no-ops.
+          [[ "$CURRENT" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          if [[ "$INCOMING" == "$CURRENT" || "$(printf '%s\n' "$CURRENT" "$INCOMING" | sort -V | tail -n1)" != "$INCOMING" ]]; then
+            echo "promote=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "promote=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Download and verify published release assets
+        if: steps.release.outputs.promote == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.release.outputs.tag }}
@@ -89,6 +99,7 @@ jobs:
             '}' > updates/latest.json
 
       - name: Commit verified manifest
+        if: steps.release.outputs.promote == 'true'
         run: |
           set -euo pipefail
           if git diff --quiet -- updates/latest.json; then

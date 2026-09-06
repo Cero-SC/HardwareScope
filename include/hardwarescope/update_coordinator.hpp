@@ -15,6 +15,7 @@ constexpr UINT kUpdateCompletedMessage = WM_APP + 52U;
 enum class UpdateCompletionStatus : std::uint8_t {
     failed,
     current,
+    available,
     ready,
 };
 
@@ -31,5 +32,6 @@ struct UpdateCompletion final {
     bool automatic,
     std::optional<SemanticVersion> skipped_version = std::nullopt) noexcept;
 [[nodiscard]] std::optional<UpdateCompletion> TakeNativeUpdateCompletion() noexcept;
+[[nodiscard]] bool BeginNativeUpdateDownload(HWND notification_window, UpdateManifest manifest) noexcept;
 
 } // namespace hardwarescope

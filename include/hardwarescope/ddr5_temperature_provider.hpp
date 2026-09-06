@@ -31,6 +31,7 @@ public:
     [[nodiscard]] HRESULT LastError() const noexcept { return last_error_; }
 
 private:
+    friend struct SensorProviderTestAccess;
     struct Bus final {
         PawnIoExecutor executor{};
         bool available{};

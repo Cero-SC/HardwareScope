@@ -203,7 +203,7 @@ bool Nct6687Provider::Initialize(const HINSTANCE resources) noexcept {
 }
 
 bool Nct6687Provider::AcquireMutex(const DWORD timeout_ms) noexcept {
-    if (isa_mutex_ == nullptr) return true;
+    if (isa_mutex_ == nullptr) { mutex_owned_ = false; return false; }
     const auto result = WaitForSingleObject(isa_mutex_, timeout_ms);
     mutex_owned_ = result == WAIT_OBJECT_0 || result == WAIT_ABANDONED;
     return mutex_owned_;
@@ -242,8 +242,10 @@ bool Nct6687Provider::ReadBankedByte(const std::uint16_t address, std::uint8_t& 
 }
 
 void Nct6687Provider::Refresh() noexcept {
-    if (!available_ || !AcquireMutex(50U)) return;
+    // A failed refresh must not republish the preceding measurement as live.
     cached_sensor_count_ = 0U;
+    last_refresh_ = std::chrono::steady_clock::now();
+    if (!available_ || !AcquireMutex(50U)) return;
     if (!ec_register_space_) {
         constexpr std::array<std::pair<std::uint32_t, const wchar_t*>, 2U> temperatures{{
             {0x075U, L"CPU Socket temperature"},

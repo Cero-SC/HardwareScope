@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][string]$InstallerPath)
+param([Parameter(Mandatory)][string]$InstallerPath, [string]$PreviousInstallerPath)
 $ErrorActionPreference = 'Stop'
 # Destructive package tests are restricted to a disposable GitHub-hosted runner.
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
@@ -20,9 +20,17 @@ function Invoke-Package([string]$Path, [string[]]$Arguments) {
     if (-not $process.WaitForExit(120000)) { throw "Package timed out: $Path" }
     if ($process.ExitCode -ne 0) { throw "Package failed: $Path (exit $($process.ExitCode))" }
 }
-foreach ($scenario in @('clean', 'upgrade')) {
+$baselineInstaller = if ($PreviousInstallerPath) { (Resolve-Path -LiteralPath $PreviousInstallerPath).Path } else { $installer }
+if ($PreviousInstallerPath) {
+    $previousVersion = [version]((Get-Item -LiteralPath $baselineInstaller).VersionInfo.ProductVersion.Trim([char]0).Trim())
+    $candidateVersion = [version]((Get-Item -LiteralPath $installer).VersionInfo.ProductVersion.Trim([char]0).Trim())
+    if ($previousVersion -ge $candidateVersion) { throw 'Historical upgrade requires a strictly older baseline installer.' }
+}
+$secondScenario = if ($PreviousInstallerPath) { 'upgrade' } else { 'same-version-reinstall' }
+foreach ($scenario in @('clean', $secondScenario)) {
     $log = Join-Path $env:RUNNER_TEMP "HardwareScope-$scenario.log"
-    Invoke-Package $installer @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ('/LOG="' + $log + '"'))
+    $scenarioInstaller = if ($scenario -eq 'clean') { $baselineInstaller } else { $installer }
+    Invoke-Package $scenarioInstaller @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ('/LOG="' + $log + '"'))
     $service = Get-Service HardwareScopeSensorService
     $service.WaitForStatus('Running', [TimeSpan]::FromSeconds(20))
     if ($service.StartType -ne 'Automatic') { throw 'Sensor service is not automatic.' }

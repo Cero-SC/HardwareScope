@@ -251,7 +251,7 @@ void GraphWindow::Render(const HDC destination, const RECT& client) noexcept {
     SelectObject(memory, old_pen);
     DeleteObject(grid_pen);
 
-    auto range = history_.Range();
+    auto range = history_.Range(view_history_seconds_);
     const auto span = std::max(0.001, range.maximum - range.minimum);
     const auto view_milliseconds = static_cast<std::uint64_t>(view_history_seconds_) * 1'000ULL;
     for (std::size_t series_index{}; series_index < history_.SeriesCount(); ++series_index) {
@@ -259,7 +259,7 @@ void GraphWindow::Render(const HDC destination, const RECT& client) noexcept {
         if (series.count < 2U) continue;
         const auto graph_pen = CreatePen(PS_SOLID, Scale(dpi_, static_cast<int>(settings_.osd_graph_line_thickness_px)), WinColor(settings_.osd_graph_colors_rgb[series_index]));
         old_pen = SelectObject(memory, graph_pen);
-        const auto newest_tick = series.Timestamp(series.count - 1U);
+        const auto newest_tick = history_.LatestTick();
         std::size_t start{};
         while (start + 1U < series.count && newest_tick - series.Timestamp(start) > view_milliseconds) ++start;
         for (std::size_t sample_index = start; sample_index < series.count; ++sample_index) {
@@ -268,7 +268,7 @@ void GraphWindow::Render(const HDC destination, const RECT& client) noexcept {
             const auto x = plot.right - static_cast<int>(std::min(age, view_milliseconds) * static_cast<std::uint64_t>(plot.right - plot.left) / std::max<std::uint64_t>(1U, view_milliseconds));
             const auto normalized = std::clamp((series.Sample(sample_index) - range.minimum) / span, 0.0, 1.0);
             const auto y = plot.bottom - static_cast<int>(std::llround(normalized * static_cast<double>(plot.bottom - plot.top)));
-            if (sample_index == start) MoveToEx(memory, x, y, nullptr);
+            if (sample_index == start || series.BreakBefore(sample_index)) MoveToEx(memory, x, y, nullptr);
             else LineTo(memory, x, y);
         }
         SelectObject(memory, old_pen);

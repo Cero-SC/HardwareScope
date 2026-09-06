@@ -1,6 +1,7 @@
 # Performance and release budgets
 
-These are release gates, not aspirations.
+These are candidate qualification targets. Historical measurements below are not
+evidence for a newly built candidate; record fresh results before stable promotion.
 
 | Area | Release target |
 |---|---:|
@@ -11,7 +12,7 @@ These are release gates, not aspirations.
 | Window drag/resize | no sensor-caused frame stalls |
 | Snapshot handoff | bounded, no unbounded queues |
 | Handle growth over five minutes | zero sustained growth |
-| Sensor provider crash | isolated error, UI remains responsive |
+| Sensor provider crash | may terminate its host; UI/service recovery must be tested |
 | FPS capture on desktop | stopped |
 | Settings/update network work | never blocks the UI thread |
 

@@ -121,6 +121,9 @@ private:
     AppSettings settings_{};
     UiPalette palette_{};
     SettingsStore settings_store_;
+    AsyncSettingsWriter settings_writer_;
+    void SaveSettings() noexcept;
+    void InstallVerifiedUpdate(const UpdateCompletion& completion) noexcept;
     OsdWindow osd_window_;
     OsdWindow fps_osd_window_;
     GraphWindow graph_window_;

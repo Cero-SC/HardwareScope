@@ -116,7 +116,7 @@ jobs:
             $lines,
             [Text.UTF8Encoding]::new($false))
 
-      - name: Verify clean installation, upgrade, driver access, and uninstall
+      - name: Verify clean installation, same-version reinstall, driver access, and uninstall
         shell: pwsh
         run: ./tests/clean_install_validation.ps1 -InstallerPath 'out/packages/HardwareScope-Setup-${{ steps.version.outputs.version }}-x64.exe'
 
@@ -143,7 +143,10 @@ jobs:
         with:
           name: HardwareScope ${{ steps.version.outputs.version }}
           body_path: ${{ steps.version.outputs.notes }}
-          make_latest: true
+          # Build candidates without advertising unqualified bytes to updaters.
+          # Promote the same draft assets only after RELEASING.md qualification.
+          draft: true
+          make_latest: false
           fail_on_unmatched_files: true
           files: |
             out/packages/HardwareScope-Setup-${{ steps.version.outputs.version }}-x64.exe

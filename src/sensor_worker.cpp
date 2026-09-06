@@ -86,6 +86,7 @@ SensorWorker::~SensorWorker() {
 }
 
 void SensorWorker::Start(std::chrono::milliseconds interval) {
+    ConfigureInterval(interval);
     if (running_.exchange(true, std::memory_order_acq_rel)) return;
     privileged_status_.store(PrivilegedSensorStatus::starting, std::memory_order_release);
     interval = std::clamp(interval, std::chrono::milliseconds{100}, std::chrono::milliseconds{10'000});
@@ -93,11 +94,30 @@ void SensorWorker::Start(std::chrono::milliseconds interval) {
 }
 
 void SensorWorker::Stop() noexcept {
-    if (!running_.exchange(false, std::memory_order_acq_rel)) return;
+    RequestStop();
     if (thread_.joinable()) {
         thread_.request_stop();
         thread_.join();
     }
+}
+
+void SensorWorker::RequestStop() noexcept {
+    if (thread_.joinable()) thread_.request_stop();
+    configuration_wake_.notify_all();
+}
+
+void SensorWorker::ConfigureInterval(const std::chrono::milliseconds interval) noexcept {
+    const std::scoped_lock lock(configuration_mutex_);
+    configuration_.interval = std::clamp(interval, std::chrono::milliseconds{100}, std::chrono::milliseconds{10'000});
+    ++configuration_.revision;
+    configuration_wake_.notify_all();
+}
+
+void SensorWorker::SetSuspended(const bool suspended) noexcept {
+    const std::scoped_lock lock(configuration_mutex_);
+    configuration_.suspended = suspended;
+    ++configuration_.revision;
+    configuration_wake_.notify_all();
 }
 
 bool SensorWorker::Running() const noexcept {
@@ -113,31 +133,33 @@ void SensorWorker::ConfigureFps(
     const bool game_only,
     const std::uint32_t refresh_interval_ms,
     const std::uint32_t smoothing_interval_ms) noexcept {
-    if (Running()) return;
-    fps_enabled_ = enabled;
-    fps_game_only_ = game_only;
-    fps_refresh_interval_ms_ = std::clamp(refresh_interval_ms, 50U, 500U);
-    fps_smoothing_interval_ms_ = std::clamp(smoothing_interval_ms, 250U, 1'250U);
+    const std::scoped_lock lock(configuration_mutex_);
+    configuration_.fps_enabled = enabled;
+    configuration_.fps_game_only = game_only;
+    configuration_.fps_refresh_interval_ms = std::clamp(refresh_interval_ms, 50U, 500U);
+    configuration_.fps_smoothing_interval_ms = std::clamp(smoothing_interval_ms, 250U, 1'250U);
+    ++configuration_.revision;
+    configuration_wake_.notify_all();
 }
 
 void SensorWorker::ConfigureMinMaxReset(const bool on_game_launch, const std::uint32_t interval_minutes) noexcept {
-    if (Running()) return;
-    reset_min_max_on_game_launch_ = on_game_launch;
-    reset_min_max_interval_minutes_ = std::min(interval_minutes, 10'080U);
+    const std::scoped_lock lock(configuration_mutex_);
+    configuration_.reset_min_max_on_game_launch = on_game_launch;
+    configuration_.reset_min_max_interval_minutes = std::min(interval_minutes, 10'080U);
+    ++configuration_.revision;
+    configuration_wake_.notify_all();
 }
 
 void SensorWorker::RequestMinMaxReset() noexcept {
     reset_history_requested_.store(true, std::memory_order_release);
 }
 
-void SensorWorker::Run(const std::stop_token stop_token, const std::chrono::milliseconds interval) noexcept {
+void SensorWorker::Run(const std::stop_token stop_token, std::chrono::milliseconds interval) noexcept {
     if (workspace_ == nullptr) {
         running_.store(false, std::memory_order_release);
         return;
     }
     static_cast<void>(SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL));
-    std::condition_variable_any wake;
-    std::mutex wake_mutex;
     std::uint64_t sequence = 0;
     if (mode_ == SensorWorkerMode::native) static_cast<void>(nvidia_provider_.Initialize());
     if (mode_ == SensorWorkerMode::native) static_cast<void>(amd_gpu_provider_.Initialize());
@@ -155,18 +177,37 @@ void SensorWorker::Run(const std::stop_token stop_token, const std::chrono::mill
     auto next_hardware_refresh = std::chrono::steady_clock::time_point{};
     auto last_history_reset = std::chrono::steady_clock::now();
     bool previous_game_target_active{};
+    std::uint64_t applied_revision = UINT64_MAX;
+    Configuration configuration;
 
     while (!stop_token.stop_requested()) {
+        {
+            std::unique_lock lock(configuration_mutex_);
+            configuration = configuration_;
+        }
+        if (configuration.revision != applied_revision) {
+            interval = configuration.interval;
+            next_hardware_refresh = {};
+            applied_revision = configuration.revision;
+        }
+        if (configuration.suspended) {
+            if (mode_ == SensorWorkerMode::native) {
+                static_cast<void>(privileged_bridge_.SetFpsTarget(0U, configuration.fps_smoothing_interval_ms, static_cast<std::uint32_t>(interval.count())));
+            }
+            std::unique_lock lock(configuration_mutex_);
+            configuration_wake_.wait(lock, stop_token, [this] { return !configuration_.suspended; });
+            continue;
+        }
         auto& snapshot = workspace_->publish_snapshot;
         ResetSnapshot(snapshot);
         bool frame_rate_available{};
         bool game_target_active{};
         if (mode_ == SensorWorkerMode::native) {
-            const auto game = fps_enabled_ ? FindGameProcess(GetCurrentProcessId()) : GameProcess{};
+            const auto game = configuration.fps_enabled ? FindGameProcess(GetCurrentProcessId(), 0U, !configuration.fps_game_only) : GameProcess{};
             game_target_active = game.process_id != 0U;
             static_cast<void>(privileged_bridge_.SetFpsTarget(
                 game.process_id,
-                fps_smoothing_interval_ms_,
+                configuration.fps_smoothing_interval_ms,
                 static_cast<std::uint32_t>(interval.count())));
             const auto now = std::chrono::steady_clock::now();
             auto& hardware = workspace_->last_hardware_snapshot;
@@ -178,7 +219,7 @@ void SensorWorker::Run(const std::stop_token stop_token, const std::chrono::mill
             }
             CopySnapshot(hardware, snapshot);
             snapshot.sequence = sequence;
-            if (fps_enabled_) {
+            if (configuration.fps_enabled) {
                 const auto new_end = std::remove_if(snapshot.sensors.begin(), snapshot.sensors.begin() + snapshot.count, [](const SensorValue& sensor) {
                     return sensor.kind == SensorKind::frame_rate;
                 });
@@ -189,34 +230,42 @@ void SensorWorker::Run(const std::stop_token stop_token, const std::chrono::mill
             CollectSynthetic(++sequence, snapshot);
         }
         const auto history_now = std::chrono::steady_clock::now();
-        const auto periodic_reset = reset_min_max_interval_minutes_ != 0U
-            && history_now - last_history_reset >= std::chrono::minutes{reset_min_max_interval_minutes_};
-        const auto game_launch_reset = reset_min_max_on_game_launch_ && game_target_active && !previous_game_target_active;
+        const auto periodic_reset = configuration.reset_min_max_interval_minutes != 0U
+            && history_now - last_history_reset >= std::chrono::minutes{configuration.reset_min_max_interval_minutes};
+        const auto game_launch_reset = configuration.reset_min_max_on_game_launch && game_target_active && !previous_game_target_active;
         if (reset_history_requested_.exchange(false, std::memory_order_acq_rel) || periodic_reset || game_launch_reset) {
             history_ = {};
             history_count_ = 0U;
             last_history_reset = history_now;
         }
         previous_game_target_active = game_target_active;
+        {
+            const std::scoped_lock lock(configuration_mutex_);
+            if (configuration_.suspended || stop_token.stop_requested()) continue;
+        }
         ApplyHistory(snapshot);
         store_.Publish(snapshot);
         if (callback_ != nullptr) callback_(callback_context_, sequence);
 
         const auto publish_interval = mode_ == SensorWorkerMode::native
-            ? SelectSensorPublishInterval(interval, fps_refresh_interval_ms_, fps_enabled_, fps_game_only_, frame_rate_available || game_target_active)
+            ? SelectSensorPublishInterval(interval, configuration.fps_refresh_interval_ms, configuration.fps_enabled, configuration.fps_game_only, frame_rate_available)
             : interval;
-        std::unique_lock lock(wake_mutex);
-        static_cast<void>(wake.wait_for(lock, stop_token, publish_interval, [] { return false; }));
+        std::unique_lock lock(configuration_mutex_);
+        static_cast<void>(configuration_wake_.wait_for(lock, stop_token, publish_interval,
+            [this, applied_revision] { return configuration_.revision != applied_revision; }));
     }
-    static_cast<void>(privileged_bridge_.SetFpsTarget(
-        0U,
-        fps_smoothing_interval_ms_,
-        static_cast<std::uint32_t>(interval.count())));
+    if (mode_ == SensorWorkerMode::native) {
+        static_cast<void>(privileged_bridge_.SetFpsTarget(
+            0U,
+            configuration.fps_smoothing_interval_ms,
+            static_cast<std::uint32_t>(interval.count())));
+    }
     storage_provider_.Reset();
     nvidia_provider_.Close();
     amd_gpu_provider_.Close();
     privileged_collector_.Close();
     privileged_bridge_.Close();
+    running_.store(false, std::memory_order_release);
 }
 
 void SensorWorker::CollectNative(const std::uint64_t sequence, SensorSnapshot& snapshot) noexcept {

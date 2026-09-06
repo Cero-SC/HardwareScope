@@ -389,7 +389,7 @@ UpdatePromptResult ShowUpdatePromptWindow(
     static_cast<void>(swprintf_s(heading, L"Version %u.%u.%u is ready",
         manifest.version.major, manifest.version.minor, manifest.version.patch));
     state.heading = heading;
-    state.message = L"The installer has been downloaded and verified. Update now, or choose when HardwareScope should remind you again.";
+    state.message = L"A new release is available. Update now to download and verify it, or choose when HardwareScope should remind you again.";
     static_cast<void>(CreateAndRun(state));
     return state.result;
 }

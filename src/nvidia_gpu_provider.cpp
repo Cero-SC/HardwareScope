@@ -269,7 +269,8 @@ bool NvidiaGpuProvider::Initialize() noexcept {
                         const auto bus_id = FormatNvmlPciBusId(gpu.pci_bus_id);
                         mapped = nvml_get_handle_by_bus(bus_id.data(), &gpu.nvml_handle) == kNvOk;
                     }
-                    if (!mapped) static_cast<void>(nvml_get_handle(static_cast<unsigned int>(index), &gpu.nvml_handle));
+                    // Different APIs need not enumerate adapters in the same order.
+                    if (!mapped) gpu.nvml_handle = nullptr;
                 }
             }
         } else {

@@ -106,7 +106,7 @@ bool Ddr5TemperatureProvider::ReadWord(
 }
 
 bool Ddr5TemperatureProvider::AcquireMutex(HANDLE const mutex, bool& owned, const DWORD timeout_ms) noexcept {
-    if (mutex == nullptr) return true;
+    if (mutex == nullptr) { owned = false; return false; }
     const auto result = WaitForSingleObject(mutex, timeout_ms);
     owned = result == WAIT_OBJECT_0 || result == WAIT_ABANDONED;
     return owned;
@@ -159,6 +159,8 @@ void Ddr5TemperatureProvider::Refresh() noexcept {
     const auto now = std::chrono::steady_clock::now();
     if (last_refresh_.time_since_epoch().count() != 0 && now - last_refresh_ < kRefreshInterval) return;
     last_refresh_ = now;
+    // Cached values are valid only until the next attempted measurement.
+    cached_sensor_count_ = 0U;
     if (!AcquireMutex(smbus_mutex_, smbus_mutex_owned_, 100U)) return;
 
     std::array<SensorValue, 16U> refreshed{};

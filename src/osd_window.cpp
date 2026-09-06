@@ -338,7 +338,7 @@ void OsdWindow::Render() noexcept {
             const auto& series = graph_history_.Series(series_index);
             if (series.count < 2U) continue;
             const auto line_pixel = pixel_for(settings_.osd_graph_colors_rgb[series_index], 235U);
-            const auto newest_tick = series.Timestamp(series.count - 1U);
+            const auto newest_tick = graph_history_.LatestTick();
             auto point = [&](const std::size_t index) noexcept {
                 const auto sample_tick = series.Timestamp(index);
                 const auto age = newest_tick >= sample_tick ? newest_tick - sample_tick : 0U;
@@ -352,6 +352,7 @@ void OsdWindow::Render() noexcept {
             auto previous = point(first_visible);
             for (std::size_t index = first_visible + 1U; index < series.count; ++index) {
                 const auto next = point(index);
+                if (series.BreakBefore(index)) { previous = next; continue; }
                 auto x0 = previous.x;
                 auto y0 = previous.y;
                 const auto dx = std::abs(next.x - x0);

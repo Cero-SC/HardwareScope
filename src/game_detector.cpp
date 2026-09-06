@@ -17,10 +17,10 @@ constexpr std::array<std::wstring_view, 37U> kExcluded{
     L"EADesktop.exe", L"UbisoftConnect.exe", L"upc.exe", L"Battle.net.exe", L"GalaxyClient.exe", L"GameBar.exe",
     L"RadeonSoftware.exe", L"Codex.exe"};
 
-constexpr std::array<std::wstring_view, 14U> kGamePaths{
+constexpr std::array<std::wstring_view, 13U> kGamePaths{
     L"\\steamapps\\common\\", L"\\epic games\\", L"\\gog games\\", L"\\gog galaxy\\games\\",
     L"\\xboxgames\\", L"\\riot games\\", L"\\ea games\\", L"\\ubisoft\\games\\",
-    L"\\starcitizen\\", L"\\world of warcraft\\", L"\\diablo ", L"\\overwatch\\", L"\\call of duty\\", L"\\games\\"};
+    L"\\starcitizen\\", L"\\world of warcraft\\", L"\\diablo ", L"\\overwatch\\", L"\\call of duty\\"};
 
 bool EqualsInsensitive(const std::wstring_view left, const std::wstring_view right) noexcept {
     return left.size() == right.size() && _wcsnicmp(left.data(), right.data(), left.size()) == 0;
@@ -80,7 +80,7 @@ GameProcess ResolveCandidate(const std::uint32_t process_id, const bool allow_si
     const auto known = IsKnownGameExecutable(name, path);
     if (!known && (!allow_sized_window || !IsGameSizedWindow(window, name))) return result;
     result.process_id = process_id;
-    result.known_game = true;
+    result.known_game = known;
     static_cast<void>(wcsncpy_s(result.application.data(), result.application.size(), std::wstring{name}.c_str(), _TRUNCATE));
     return result;
 }
@@ -114,12 +114,12 @@ bool IsKnownGameExecutable(const std::wstring_view application, const std::wstri
     return std::any_of(kGamePaths.begin(), kGamePaths.end(), [path](const auto fragment) { return ContainsInsensitive(path, fragment); });
 }
 
-GameProcess FindGameProcess(const std::uint32_t own_process_id, const std::uint32_t current_process_id) noexcept {
+GameProcess FindGameProcess(const std::uint32_t own_process_id, const std::uint32_t current_process_id, const bool allow_unknown_fullscreen) noexcept {
     const auto foreground = GetForegroundWindow();
     DWORD foreground_process_id{};
     if (foreground != nullptr) static_cast<void>(GetWindowThreadProcessId(foreground, &foreground_process_id));
     if (foreground_process_id != 0U && foreground_process_id != own_process_id) {
-        const auto candidate = ResolveCandidate(foreground_process_id, true, foreground);
+        const auto candidate = ResolveCandidate(foreground_process_id, allow_unknown_fullscreen, foreground);
         if (candidate.process_id != 0U) return candidate;
     }
     if (current_process_id != 0U && current_process_id != own_process_id) {

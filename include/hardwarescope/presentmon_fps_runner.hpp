@@ -7,9 +7,33 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <string_view>
+#include <optional>
 #include <thread>
 
 namespace hardwarescope {
+
+struct PresentMonCsvSample final {
+    double milliseconds{};
+    bool new_stream{};
+};
+
+// Bounded stream selection; statistics never combine different swap chains.
+class PresentMonCsvStream final {
+public:
+    [[nodiscard]] std::optional<PresentMonCsvSample> Consume(
+        std::string_view line, std::uint32_t process_id, std::uint64_t now) noexcept;
+private:
+    struct Stream { std::uint64_t id{}; std::uint32_t count{}; };
+    std::array<Stream, 8> streams_{};
+    std::size_t interval_column_{std::string_view::npos};
+    std::size_t process_column_{std::string_view::npos};
+    std::size_t chain_column_{std::string_view::npos};
+    std::uint64_t selected_{};
+    std::uint64_t window_tick_{};
+    std::uint64_t last_selected_tick_{};
+    bool reset_pending_{true};
+};
 
 struct PresentMonFpsReading final {
     bool available{};
@@ -35,7 +59,7 @@ public:
 private:
     void Start(std::uint32_t process_id) noexcept;
     void ReadOutput(std::stop_token token, HANDLE pipe, std::uint32_t process_id) noexcept;
-    void RecordInterval(double milliseconds, std::uint32_t process_id) noexcept;
+    void RecordInterval(double milliseconds, std::uint32_t process_id, bool new_stream) noexcept;
     [[nodiscard]] std::wstring RuntimePath() const;
     static void CleanupOrphanedSessions() noexcept;
 

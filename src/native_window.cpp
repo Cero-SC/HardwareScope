@@ -28,6 +28,24 @@ namespace hardwarescope {
 namespace {
 
 constexpr float kContentInset = 12.0F;
+constexpr UINT_PTR kSettingsWriteTimer = 0x48535057U;
+
+bool IsIsolatedTest() noexcept {
+#if HARDWARESCOPE_INTERNAL_TEST_HOOKS
+    return GetEnvironmentVariableW(L"HARDWARESCOPE_TEST_SETTINGS", nullptr, 0U) > 1U;
+#else
+    return false;
+#endif
+}
+
+std::filesystem::path WindowSettingsPath() {
+#if HARDWARESCOPE_INTERNAL_TEST_HOOKS
+    std::array<wchar_t, 32'768U> path{};
+    const auto length = GetEnvironmentVariableW(L"HARDWARESCOPE_TEST_SETTINGS", path.data(), static_cast<DWORD>(path.size()));
+    if (length > 0U && length < path.size()) return std::filesystem::path{path.data()};
+#endif
+    return SettingsStore::DefaultPath();
+}
 constexpr float kSearchTop = 78.0F;
 constexpr float kSearchHeight = 32.0F;
 constexpr float kFavoritesButtonWidth = 126.0F;
@@ -138,8 +156,10 @@ D2D1_COLOR_F Color(const std::uint32_t rgb) noexcept {
 
 NativeWindow::NativeWindow(const HINSTANCE instance) noexcept
     : instance_(instance),
-      sensor_worker_(snapshots_, &NativeWindow::SnapshotPublished, this, SensorWorkerMode::native, instance),
-      settings_store_(SettingsStore::DefaultPath()),
+      sensor_worker_(snapshots_, &NativeWindow::SnapshotPublished, this,
+          IsIsolatedTest() ? SensorWorkerMode::synthetic : SensorWorkerMode::native, instance),
+      settings_store_(WindowSettingsPath()),
+      settings_writer_(WindowSettingsPath()),
       osd_window_(instance, OsdWindowRole::primary),
       fps_osd_window_(instance, OsdWindowRole::fps),
       graph_window_(instance),
@@ -150,13 +170,17 @@ NativeWindow::NativeWindow(const HINSTANCE instance) noexcept
         legacy_path /= L"settings.json";
         if (MigrateLegacySettingsFile(legacy_path, settings_)) {
             settings_.onboarding_completed = true;
-            static_cast<void>(settings_store_.Save(settings_));
+            SaveSettings();
         }
     }
     first_run_ = !settings_.onboarding_completed;
 #if HARDWARESCOPE_INTERNAL_TEST_HOOKS
     settings_.start_minimized = false;
     first_run_ = false;
+    if (IsIsolatedTest()) {
+        settings_.automatic_updates = false;
+        settings_.start_with_windows = false;
+    }
 #endif
     collapsed_sections_ = settings_.collapsed_sections;
     palette_ = PaletteFor(settings_.theme, settings_.text_color_rgb, settings_.high_contrast);
@@ -168,6 +192,11 @@ NativeWindow::NativeWindow(const HINSTANCE instance) noexcept
     sensor_worker_.ConfigureMinMaxReset(
         settings_.reset_min_max_on_game_launch,
         settings_.reset_min_max_interval_minutes);
+}
+
+void NativeWindow::SaveSettings() noexcept {
+    settings_writer_.Request(settings_);
+    if (window_ != nullptr) SetTimer(window_, kSettingsWriteTimer, 1'000U, nullptr);
 }
 
 NativeWindow::~NativeWindow() {
@@ -353,7 +382,7 @@ LRESULT NativeWindow::WindowProcedure(const UINT message, const WPARAM wparam, c
             if (!suspended_) {
                 suspended_ = true;
                 resume_waiting_for_snapshot_ = false;
-                sensor_worker_.Stop();
+                sensor_worker_.SetSuspended(true);
                 MSG pending{};
                 while (PeekMessageW(&pending, window_, kSnapshotMessage, kSnapshotMessage, PM_REMOVE)) {}
                 osd_window_.SetVisible(false);
@@ -370,6 +399,7 @@ LRESULT NativeWindow::WindowProcedure(const UINT message, const WPARAM wparam, c
                 resume_waiting_for_snapshot_ = true;
                 osd_window_.SetVisible(false);
                 fps_osd_window_.SetVisible(false);
+                sensor_worker_.SetSuspended(false);
                 sensor_worker_.Start(std::chrono::milliseconds{settings_.refresh_interval_ms});
             }
             return TRUE;
@@ -452,6 +482,14 @@ LRESULT NativeWindow::WindowProcedure(const UINT message, const WPARAM wparam, c
         HandleCommand(LOWORD(wparam));
         return 0;
     case WM_TIMER:
+        if (wparam == kSettingsWriteTimer) {
+            if (!settings_writer_.Pending()) KillTimer(window_, kSettingsWriteTimer);
+            if (settings_writer_.TakeFailure()) {
+                ShowUpdateNoticeWindow(window_, instance_, settings_, L"Settings could not be saved",
+                    L"Your changes are active in this session, but could not be saved to disk. Check free space and folder permissions, then save again.", true);
+            }
+            return 0;
+        }
         if (wparam == kStartupUpdateTimer) {
             KillTimer(window_, kStartupUpdateTimer);
             if (!BeginNativeUpdateCheck(window_, true, SkippedUpdateVersion(settings_))) {
@@ -533,7 +571,7 @@ LRESULT NativeWindow::WindowProcedure(const UINT message, const WPARAM wparam, c
     }
     case kQueueAutomaticUpdateNotificationTestMessage: {
         UpdateCompletion completion{};
-        completion.status = UpdateCompletionStatus::ready;
+        completion.status = UpdateCompletionStatus::available;
         completion.automatic = true;
         completion.manifest.version = SemanticVersion{9U, 9U, 9U};
         pending_update_ = completion;
@@ -584,11 +622,11 @@ LRESULT NativeWindow::WindowProcedure(const UINT message, const WPARAM wparam, c
 #endif
     case kGraphWindowClosedMessage:
         settings_.floating_graph_enabled = false;
-        static_cast<void>(settings_store_.Save(settings_));
+        SaveSettings();
         return 0;
     case kGraphWindowPlacementChangedMessage:
         graph_window_.CapturePlacement(settings_);
-        static_cast<void>(settings_store_.Save(settings_));
+        SaveSettings();
         return 0;
     case kTrayMessage: {
         const auto tray_event = static_cast<UINT>(LOWORD(lparam));
@@ -619,9 +657,9 @@ LRESULT NativeWindow::WindowProcedure(const UINT message, const WPARAM wparam, c
         DestroyWindow(window_);
         return 0;
     case WM_DESTROY:
-        sensor_worker_.Stop();
+        sensor_worker_.RequestStop();
         graph_window_.CapturePlacement(settings_);
-        static_cast<void>(settings_store_.Save(settings_));
+        SaveSettings();
         RemoveTrayIcon();
         PostQuitMessage(0);
         return 0;
@@ -643,8 +681,9 @@ std::uint64_t NativeWindow::LatestSnapshotSequence() const noexcept {
 }
 
 void NativeWindow::HandleSnapshotMessage() noexcept {
+    if (suspended_) return;
     snapshots_.ReadLatest(ui_snapshot_);
-    if (InitializeDefaultFavorites(ui_snapshot_, settings_)) static_cast<void>(settings_store_.Save(settings_));
+    if (InitializeDefaultFavorites(ui_snapshot_, settings_)) SaveSettings();
     osd_window_.Update(ui_snapshot_);
     fps_osd_window_.Update(ui_snapshot_);
     graph_window_.Update(ui_snapshot_);
@@ -1087,7 +1126,7 @@ void NativeWindow::HandleContentClick(const POINT client_point) {
         search_active_ = false;
         settings_.favorites_only = !settings_.favorites_only;
         scroll_offset_ = 0.0F;
-        static_cast<void>(settings_store_.Save(settings_));
+        SaveSettings();
         InvalidateRect(window_, nullptr, FALSE);
         return;
     }
@@ -1103,7 +1142,7 @@ void NativeWindow::HandleContentClick(const POINT client_point) {
         if (row_index < view.count && view.rows[row_index].is_section) {
             collapsed_sections_ ^= 1U << static_cast<std::uint32_t>(view.rows[row_index].section);
             settings_.collapsed_sections = collapsed_sections_;
-            static_cast<void>(settings_store_.Save(settings_));
+            SaveSettings();
             scroll_offset_ = 0.0F;
         } else if (row_index < view.count && !view.rows[row_index].is_placeholder) {
             const auto table_width = std::max(0.0F, client_width - kContentInset * 2.0F);
@@ -1113,7 +1152,7 @@ void NativeWindow::HandleContentClick(const POINT client_point) {
                 if (settings_.IsFavorite(sensor.id)) static_cast<void>(settings_.RemoveFavorite(sensor.id));
                 else static_cast<void>(settings_.AddFavorite(sensor.id));
                 settings_.favorites_initialized = true;
-                static_cast<void>(settings_store_.Save(settings_));
+                SaveSettings();
                 scroll_offset_ = std::max(0.0F, scroll_offset_ - (settings_.favorites_only ? kSensorRowHeight : 0.0F));
                 InvalidateRect(window_, nullptr, FALSE);
                 return;
@@ -1124,13 +1163,12 @@ void NativeWindow::HandleContentClick(const POINT client_point) {
             }
             const auto selected = IsSensorSelectedForOsd(sensor, settings_);
             SetSensorSelectedForOsd(sensor, settings_, !selected);
-            static_cast<void>(settings_store_.Save(settings_));
+            SaveSettings();
             osd_window_.ApplySettings(settings_);
             fps_osd_window_.ApplySettings(settings_);
             osd_window_.Update(ui_snapshot_);
             fps_osd_window_.Update(ui_snapshot_);
             if (sensor.kind == SensorKind::frame_rate) {
-                sensor_worker_.Stop();
                 sensor_worker_.ConfigureFps(
                     settings_.fps_enabled,
                     settings_.fps_game_only,
@@ -1326,7 +1364,7 @@ void NativeWindow::HandleCommand(const int command) noexcept {
         settings_.show_osd = !settings_.show_osd;
         osd_window_.SetVisible(settings_.show_osd);
         fps_osd_window_.SetVisible(settings_.show_osd);
-        static_cast<void>(settings_store_.Save(settings_));
+        SaveSettings();
     } else if (command == kCommandExit) {
         static_cast<void>(PostMessageW(window_, WM_CLOSE, 0, 0));
     }
@@ -1339,13 +1377,13 @@ void NativeWindow::ShowSettings() noexcept {
     if (!ShowSettingsWindow(window_, updated, ui_snapshot_)) return;
     settings_ = updated;
     palette_ = PaletteFor(settings_.theme, settings_.text_color_rgb, settings_.high_contrast);
-    static_cast<void>(settings_store_.Save(settings_));
-    static_cast<void>(ApplyStartupRegistration(settings_.start_with_windows, settings_.start_minimized));
+    SaveSettings();
+    if (!IsIsolatedTest()) static_cast<void>(ApplyStartupRegistration(settings_.start_with_windows, settings_.start_minimized));
     osd_window_.ApplySettings(settings_);
     fps_osd_window_.ApplySettings(settings_);
     graph_window_.ApplySettings(settings_);
     tray_panel_.ApplySettings(settings_);
-    sensor_worker_.Stop();
+    sensor_worker_.ConfigureInterval(std::chrono::milliseconds{settings_.refresh_interval_ms});
     sensor_worker_.ConfigureFps(
         settings_.fps_enabled,
         settings_.fps_game_only,
@@ -1399,7 +1437,7 @@ void NativeWindow::ShowFirstRunSetup() noexcept {
 
     settings_.onboarding_completed = true;
     first_run_ = false;
-    static_cast<void>(settings_store_.Save(settings_));
+    SaveSettings();
     if (selected == customize) ShowSettings();
     else ScheduleAutomaticUpdateCheck();
 }
@@ -1424,10 +1462,10 @@ bool NativeWindow::ShowUpdateNotification(const UpdateCompletion& completion) no
     icon.uID = 1U;
     icon.uFlags = NIF_INFO | NIF_GUID;
     icon.guidItem = kTrayIconGuid;
-    static_cast<void>(wcscpy_s(icon.szInfoTitle, L"HardwareScope update ready"));
+    static_cast<void>(wcscpy_s(icon.szInfoTitle, L"HardwareScope update available"));
     static_cast<void>(swprintf_s(
         icon.szInfo,
-        L"Version %u.%u.%u was verified. Click here to update or choose a reminder time.",
+        L"Version %u.%u.%u is available. Click here to update or choose a reminder time.",
         completion.manifest.version.major,
         completion.manifest.version.minor,
         completion.manifest.version.patch));
@@ -1451,7 +1489,7 @@ void NativeWindow::PromptForUpdate(const UpdateCompletion& completion) noexcept 
         settings_.skipped_update_major = 0U;
         settings_.skipped_update_minor = 0U;
         settings_.skipped_update_patch = 0U;
-        static_cast<void>(settings_store_.Save(settings_));
+        SaveSettings();
         ScheduleAutomaticUpdateCheck();
         return;
     }
@@ -1460,7 +1498,7 @@ void NativeWindow::PromptForUpdate(const UpdateCompletion& completion) noexcept 
         settings_.skipped_update_major = completion.manifest.version.major;
         settings_.skipped_update_minor = completion.manifest.version.minor;
         settings_.skipped_update_patch = completion.manifest.version.patch;
-        static_cast<void>(settings_store_.Save(settings_));
+        SaveSettings();
         ScheduleAutomaticUpdateCheck();
         return;
     }
@@ -1468,8 +1506,22 @@ void NativeWindow::PromptForUpdate(const UpdateCompletion& completion) noexcept 
     settings_.skipped_update_major = 0U;
     settings_.skipped_update_minor = 0U;
     settings_.skipped_update_patch = 0U;
-    static_cast<void>(settings_store_.Save(settings_));
+    SaveSettings();
 
+    if (!BeginNativeUpdateDownload(window_, completion.manifest)) {
+        ShowUpdateNoticeWindow(popup, instance_, settings_, L"Update busy",
+            L"Another update operation is running. Please try again shortly.", true);
+    } else if (popup != nullptr && popup != window_) {
+        if (const auto button = GetDlgItem(popup, kSettingsCheckUpdatesCommand); button != nullptr) {
+            EnableWindow(button, FALSE);
+            SetWindowTextW(button, L"Downloading update...");
+        }
+    }
+}
+
+void NativeWindow::InstallVerifiedUpdate(const UpdateCompletion& completion) noexcept {
+    const auto popup = GetLastActivePopup(window_);
+    if (completion.installer.empty()) return;
     std::array<wchar_t, 32'768U> module_path{};
     const auto length = GetModuleFileNameW(nullptr, module_path.data(), static_cast<DWORD>(module_path.size()));
     if (length == 0U || length >= module_path.size()) {
@@ -1503,6 +1555,10 @@ void NativeWindow::HandleUpdateCompletion(const UpdateCompletion& completion) no
             SetWindowTextW(button, L"Check for updates");
         }
     }
+    if (completion.status == UpdateCompletionStatus::ready) {
+        InstallVerifiedUpdate(completion);
+        return;
+    }
     if (completion.status == UpdateCompletionStatus::failed) {
         if (!completion.automatic) {
             wchar_t message[256]{};
@@ -1519,7 +1575,7 @@ void NativeWindow::HandleUpdateCompletion(const UpdateCompletion& completion) no
         if (completion.automatic) {
             if (const auto skipped = SkippedUpdateVersion(settings_); skipped && SameVersion(*skipped, completion.manifest.version)) {
                 settings_.update_snooze_until_unix_seconds = CurrentUnixSeconds() + 24ULL * 60ULL * 60ULL;
-                static_cast<void>(settings_store_.Save(settings_));
+                SaveSettings();
                 ScheduleAutomaticUpdateCheck();
             }
         }
@@ -1535,7 +1591,7 @@ void NativeWindow::HandleUpdateCompletion(const UpdateCompletion& completion) no
     if (completion.automatic) {
         pending_update_ = completion;
         settings_.update_snooze_until_unix_seconds = CurrentUnixSeconds() + 24ULL * 60ULL * 60ULL;
-        static_cast<void>(settings_store_.Save(settings_));
+        SaveSettings();
         ScheduleAutomaticUpdateCheck();
         static_cast<void>(ShowUpdateNotification(completion));
         return;

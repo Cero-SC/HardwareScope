@@ -97,24 +97,30 @@ std::uint32_t SensorSectionColor(const SensorSection section, const AppSettings&
 
 bool InitializeDefaultFavorites(const SensorSnapshot& snapshot, AppSettings& settings) noexcept {
     if (settings.favorites_initialized || snapshot.count == 0U) return false;
-    bool cpu_added = false;
-    bool gpu_added = false;
-    bool memory_added = false;
+    const auto before = settings.favorite_defaults_completed_mask;
+    bool cpu_added = (before & easy_cpu_package) != 0U;
+    bool gpu_added = (before & easy_gpu_core) != 0U;
+    bool memory_added = (before & easy_gpu_memory_junction) != 0U;
     for (std::uint32_t index = 0U; index < snapshot.count; ++index) {
         const auto& sensor = snapshot.sensors[index];
+        if (!sensor.available) continue;
         if (!cpu_added && (settings.easy_temperature_mask & easy_cpu_package) != 0U && IsCpuFavoriteDefault(sensor)) {
             static_cast<void>(settings.AddFavorite(sensor.id));
             cpu_added = true;
+            settings.favorite_defaults_completed_mask |= easy_cpu_package;
         } else if (!gpu_added && (settings.easy_temperature_mask & easy_gpu_core) != 0U && IsGpuCoreFavoriteDefault(sensor)) {
             static_cast<void>(settings.AddFavorite(sensor.id));
             gpu_added = true;
+            settings.favorite_defaults_completed_mask |= easy_gpu_core;
         } else if (!memory_added && (settings.easy_temperature_mask & easy_gpu_memory_junction) != 0U && IsGpuMemoryFavoriteDefault(sensor)) {
             static_cast<void>(settings.AddFavorite(sensor.id));
             memory_added = true;
+            settings.favorite_defaults_completed_mask |= easy_gpu_memory_junction;
         }
     }
-    settings.favorites_initialized = true;
-    return true;
+    const auto requested = settings.easy_temperature_mask & 7U;
+    settings.favorites_initialized = (settings.favorite_defaults_completed_mask & requested) == requested;
+    return settings.favorites_initialized || before != settings.favorite_defaults_completed_mask;
 }
 
 SensorView BuildSensorView(

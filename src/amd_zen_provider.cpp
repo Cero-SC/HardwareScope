@@ -69,7 +69,7 @@ bool AmdZenProvider::Initialize(const HINSTANCE resources) noexcept {
     if (pci_mutex_ == nullptr && GetLastError() == ERROR_ACCESS_DENIED) {
         pci_mutex_ = OpenMutexW(SYNCHRONIZE | MUTEX_MODIFY_STATE, FALSE, L"Global\\Access_PCI");
     }
-    if (!pawn_io_.LoadModuleFromResource(resources, kAmdFamily17Resource)) {
+    if (pci_mutex_ == nullptr || !pawn_io_.LoadModuleFromResource(resources, kAmdFamily17Resource)) {
         Close();
         return false;
     }
@@ -78,7 +78,7 @@ bool AmdZenProvider::Initialize(const HINSTANCE resources) noexcept {
 }
 
 bool AmdZenProvider::AcquirePciMutex(const DWORD timeout_ms) noexcept {
-    if (pci_mutex_ == nullptr) return true;
+    if (pci_mutex_ == nullptr) { mutex_owned_ = false; return false; }
     const auto result = WaitForSingleObject(pci_mutex_, timeout_ms);
     mutex_owned_ = result == WAIT_OBJECT_0 || result == WAIT_ABANDONED;
     return mutex_owned_;
@@ -117,7 +117,8 @@ bool AmdZenProvider::ReadTemperatures(AmdZenTemperatures& temperatures) noexcept
             ccd_raw &= 0xFFFU;
             const auto ccd = (static_cast<double>(ccd_raw) * 125.0 - 305'000.0) * 0.001;
             if (ccd_raw > 0U && std::isfinite(ccd) && ccd > 0.0 && ccd < 125.0) {
-                temperatures.ccd_celsius[temperatures.ccd_count++] = ccd;
+                temperatures.ccd_celsius[index] = ccd;
+                ++temperatures.ccd_count;
             }
         }
     }

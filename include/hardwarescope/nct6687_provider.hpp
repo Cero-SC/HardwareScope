@@ -36,6 +36,7 @@ public:
     [[nodiscard]] HRESULT LastError() const noexcept { return pawn_io_.LastError(); }
 
 private:
+    friend struct SensorProviderTestAccess;
     [[nodiscard]] bool ExecuteOne(const char* function, std::uint64_t input, std::uint64_t& output) noexcept;
     [[nodiscard]] bool ExecuteNone(const char* function) noexcept;
     [[nodiscard]] bool SelectSlot(std::uint64_t slot) noexcept;

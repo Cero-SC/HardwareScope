@@ -16,6 +16,7 @@ struct GameProcess final {
 
 [[nodiscard]] bool IsExcludedGameExecutable(std::wstring_view application) noexcept;
 [[nodiscard]] bool IsKnownGameExecutable(std::wstring_view application, std::wstring_view path) noexcept;
-[[nodiscard]] GameProcess FindGameProcess(std::uint32_t own_process_id, std::uint32_t current_process_id = 0U) noexcept;
+[[nodiscard]] GameProcess FindGameProcess(std::uint32_t own_process_id, std::uint32_t current_process_id = 0U,
+    bool allow_unknown_fullscreen = false) noexcept;
 
 } // namespace hardwarescope

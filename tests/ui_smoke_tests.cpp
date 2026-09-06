@@ -82,6 +82,16 @@ BOOL CALLBACK FindInstrumentedWindow(const HWND window, const LPARAM context) no
 } // namespace
 
 int wmain(const int argument_count, wchar_t** arguments) {
+    const auto has_argument = [&](const std::wstring_view expected) noexcept {
+        for (int index = 1; index < argument_count; ++index)
+            if (std::wstring_view{arguments[index]} == expected) return true;
+        return false;
+    };
+    const auto expect_no_hooks = has_argument(L"--expect-no-hooks");
+    DWORD requested_pid{};
+    for (int index = 1; index + 1 < argument_count; ++index) {
+        if (std::wstring_view{arguments[index]} == L"--pid") requested_pid = wcstoul(arguments[index + 1], nullptr, 10);
+    }
     static_cast<void>(SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2));
     std::ofstream result_log(
         std::filesystem::temp_directory_path() / "HardwareScopeNativeUiSmokeTests.log",
@@ -124,7 +134,12 @@ int wmain(const int argument_count, wchar_t** arguments) {
     } destroy_progress{progress_window};
 
     HWND window{};
-    static_cast<void>(EnumWindows(&FindInstrumentedWindow, reinterpret_cast<LPARAM>(&window)));
+    if (expect_no_hooks) {
+        if (requested_pid == 0U) { std::cerr << "FAIL: --expect-no-hooks requires --pid <target process>\n"; return 2; }
+        window = ProcessWindow(kWindowClass, nullptr, requested_pid);
+    } else {
+        static_cast<void>(EnumWindows(&FindInstrumentedWindow, reinterpret_cast<LPARAM>(&window)));
+    }
     if (window == nullptr) {
         std::cerr << "FAIL: HardwareScope native window is not running\n";
         return 1;
@@ -133,13 +148,6 @@ int wmain(const int argument_count, wchar_t** arguments) {
         static_cast<void>(SendMessageW(window, WM_COMMAND, hardwarescope::kCommandOpen, 0));
         Sleep(250U);
     }
-    const auto has_argument = [&](const std::wstring_view expected) noexcept {
-        for (int index = 1; index < argument_count; ++index) {
-            if (std::wstring_view{arguments[index]} == expected) return true;
-        }
-        return false;
-    };
-    const auto expect_no_hooks = has_argument(L"--expect-no-hooks");
     const auto skip_hover = has_argument(L"--skip-hover");
     const auto skip_update_prompt = has_argument(L"--skip-update-prompt");
     if (expect_no_hooks) {
@@ -453,9 +461,8 @@ int wmain(const int argument_count, wchar_t** arguments) {
     std::cout << "OK: tray quick panel toggles without activating or opening the full app\n";
 
     if (SendMessageW(window, WM_POWERBROADCAST, PBT_APMSUSPEND, 0U) != TRUE
-        || SendMessageW(window, hardwarescope::kQuerySensorWorkerRunningMessage, 0U, 0U) != 0
         || IsWindowVisible(osd)) {
-        std::cerr << "FAIL: suspend did not stop native sensor work and hide the OSD\n";
+        std::cerr << "FAIL: suspend did not acknowledge the asynchronous pause and hide the OSD\n";
         return 1;
     }
     if (SendMessageW(window, WM_POWERBROADCAST, PBT_APMRESUMEAUTOMATIC, 0U) != TRUE) {
@@ -473,7 +480,7 @@ int wmain(const int argument_count, wchar_t** arguments) {
         std::cerr << "FAIL: resume did not publish a fresh snapshot and restore the OSD\n";
         return 1;
     }
-    std::cout << "OK: suspend closes sensor work; resume waits for fresh telemetry before restoring OSD\n";
+    std::cout << "OK: suspend requests a nonblocking pause; resume waits for fresh telemetry before restoring OSD\n";
 
     static_cast<void>(PostMessageW(window, WM_COMMAND, hardwarescope::kCommandSettings, 0));
     HWND settings{};

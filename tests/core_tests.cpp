@@ -34,6 +34,28 @@
 #include <limits>
 #include <thread>
 
+namespace hardwarescope {
+struct SensorProviderTestAccess {
+    static bool FailedRefreshDropsCache() {
+        Nct6687Provider board;
+        board.available_ = true;
+        board.cached_sensor_count_ = 1U;
+        board.Refresh(); // null lock: must never touch hardware
+        Ddr5TemperatureProvider memory;
+        memory.available_ = true;
+        memory.cached_sensor_count_ = 1U;
+        memory.Refresh();
+        const bool invalidated = board.cached_sensor_count_ == 0U && memory.cached_sensor_count_ == 0U;
+        board.cached_sensor_count_ = 1U;
+        memory.cached_sensor_count_ = 1U;
+        board.last_refresh_ = {};
+        memory.last_refresh_ = {};
+        board.Refresh(); memory.Refresh();
+        return invalidated && board.cached_sensor_count_ == 0U && memory.cached_sensor_count_ == 0U;
+    }
+};
+}
+
 namespace {
 
 int failures = 0;
@@ -339,7 +361,7 @@ void TestSettingsStore() {
     Expect(store.Load(changed_polling) && changed_polling.refresh_interval_ms == 333U,
         "a changed millisecond polling interval persists exactly");
     auto temporary = path;
-    temporary += L".tmp";
+    temporary += L".tmp." + std::to_wstring(GetCurrentProcessId()) + L"." + std::to_wstring(GetCurrentThreadId());
     Expect(!fs::exists(temporary), "atomic save leaves no temporary settings file");
 
     const auto invalid_path = path.parent_path() / (L"HardwareScopeNativeSettings-invalid-" + std::to_wstring(GetCurrentProcessId()) + L".ini");
@@ -701,10 +723,10 @@ void TestSensorViewModel() {
 
     hardwarescope::AppSettings defaults{};
     Expect(hardwarescope::InitializeDefaultFavorites(snapshot, defaults), "first sensor snapshot initializes recommended Favorites");
-    Expect(defaults.favorites_initialized && defaults.favorite_sensor_count == 2U
+    Expect(!defaults.favorites_initialized && defaults.favorite_sensor_count == 2U
             && defaults.IsFavorite(snapshot.sensors[0].id)
             && defaults.IsFavorite(snapshot.sensors[2].id),
-        "CPU package and GPU core temperatures become initial Favorites when available");
+        "available CPU/GPU defaults are added while missing memory temperature stays pending");
     Expect(!hardwarescope::InitializeDefaultFavorites(snapshot, defaults), "recommended Favorites initialize only once");
 
     hardwarescope::SensorSnapshot missing_cpu_temperature{};
@@ -866,6 +888,109 @@ void TestVerifiedFileLock() {
     std::filesystem::remove(directory, ignored);
 }
 
+void TestRepairRegressions() {
+    using namespace hardwarescope;
+    Expect(SensorProviderTestAccess::FailedRefreshDropsCache(), "repeated failed provider refreshes discard cache and fail closed");
+    AmdZenTemperatures cpu{};
+    cpu.package_celsius = 60.0;
+    cpu.ccd_count = 1U;
+    cpu.ccd_celsius[1] = 55.0;
+    SensorSnapshot snapshot{};
+    AppendAmdZenTemperatures(snapshot, cpu, L"Test CPU");
+    Expect(snapshot.count == 2U && snapshot.sensors[1].id == 0x0100'0000'0000'0101ULL
+        && std::wstring_view{snapshot.sensors[1].name.data()} == L"CCD2 (Tdie)", "sparse physical CCD2 keeps identity");
+
+    PresentMonCsvStream csv;
+    Expect(!csv.Consume("Application,ProcessID,SwapChainAddress,MsBetweenPresents", 42U, 100U), "FPS header is not a sample");
+    auto sample = csv.Consume("\"Game, name.exe\",42,0xA,10", 42U, 110U);
+    Expect(sample && sample->new_stream && sample->milliseconds == 10.0, "quoted CSV and first stream parse without allocation");
+    Expect(!csv.Consume("Game,42,0xB,5", 42U, 120U), "different swap chain cannot enter selected stream");
+    Expect(!csv.Consume("Game,43,0xA,10", 42U, 130U), "wrong process is rejected");
+    Expect(!csv.Consume("Game,42,0xB,61000", 42U, 140U), "idle background swap chain is ignored without resetting selected history");
+    sample = csv.Consume("Game,42,0xA,1500", 42U, 1610U);
+    Expect(sample && sample->milliseconds == 1500.0 && !sample->new_stream, "valid 1500ms hitch is retained");
+    Expect(!csv.Consume("Game,42,0xA,nan", 42U, 1620U), "nonfinite interval is rejected");
+    Expect(!csv.Consume("Game,42", 42U, 1630U), "short CSV row is rejected");
+    Expect(!csv.Consume("Game,42,0xA,61000", 42U, 1640U), "history-length discontinuity is not a frame");
+    sample = csv.Consume("Game,42,0xA,10", 42U, 1650U);
+    Expect(sample && sample->new_stream, "discontinuity resets statistics on recovery");
+    sample = csv.Consume("Game,42,0xB,5", 42U, 5000U);
+    Expect(sample && sample->new_stream, "ceased stream switches with fresh statistics");
+
+    AppSettings graph_settings;
+    graph_settings.osd_graph_sensor_ids = {1, 2, 0, 0}; graph_settings.osd_graph_sensor_count = 2;
+    graph_settings.osd_graph_history_seconds = 5; graph_settings.osd_graph_refresh_interval_ms = 100;
+    const auto graph_storage = std::make_unique<GraphHistory>();
+    auto& graph = *graph_storage;
+    graph.Configure(graph_settings);
+    ResetSnapshot(snapshot); snapshot.count = 2;
+    snapshot.sensors[0].id = 1; snapshot.sensors[0].available = true; snapshot.sensors[0].unit = SensorUnit::celsius;
+    snapshot.sensors[1] = snapshot.sensors[0]; snapshot.sensors[1].id = 2; snapshot.sensors[1].unit = SensorUnit::watts;
+    for (std::uint64_t i = 1; i <= 10; ++i) { snapshot.sequence = i; graph.Update(snapshot, i * 1000U); }
+    Expect(graph.Series(0).count == 5 && graph.Series(0).Timestamp(0) == 6000U, "time window evicts at actual slow sample cadence");
+    Expect(graph.Series(1).count == 0, "imported mixed-unit series is rejected at model boundary");
+    snapshot.sequence++; snapshot.sensors[0].available = false; graph.Update(snapshot, 11000);
+    snapshot.sequence++; snapshot.sensors[0].available = true; graph.Update(snapshot, 12000);
+    Expect(graph.Series(0).BreakBefore(graph.Series(0).count - 1), "missing sample leaves explicit graph break");
+    graph.Update(snapshot, 20000);
+    Expect(graph.Series(0).count == 0, "expired history is pruned even without a new sequence");
+
+    graph.Clear();
+    ResetSnapshot(snapshot); snapshot.count = 2;
+    snapshot.sensors[0].id = 1; snapshot.sensors[0].available = true; snapshot.sensors[0].unit = SensorUnit::celsius;
+    snapshot.sensors[1] = snapshot.sensors[0]; snapshot.sensors[1].id = 2;
+    for (std::uint64_t tick = 1; tick <= 3; ++tick) { snapshot.sequence = tick; graph.Update(snapshot, tick * 1000U); }
+    snapshot.sensors[0] = snapshot.sensors[1]; snapshot.count = 1;
+    for (std::uint64_t tick = 4; tick <= 5; ++tick) { snapshot.sequence = tick; graph.Update(snapshot, tick * 1000U); }
+    Expect(graph.Series(1).count == 3 && !graph.Series(1).available,
+        "absent reference sensor preserves sibling history as a gap instead of erasing it");
+    snapshot.count = 2; snapshot.sensors[1] = snapshot.sensors[0]; snapshot.sensors[0].id = 1;
+    snapshot.sequence = 6; graph.Update(snapshot, 6000U);
+    Expect(graph.Series(1).count == 3 && graph.Series(1).Timestamp(0) == 2000U
+        && graph.Series(1).BreakBefore(graph.Series(1).count - 1),
+        "reference recovery keeps unexpired sibling samples and breaks the line across the outage");
+
+    AppSettings favorites;
+    ResetSnapshot(snapshot); snapshot.count = 1; snapshot.sensors[0].id = 1; snapshot.sensors[0].available = true;
+    snapshot.sensors[0].kind = SensorKind::utilization;
+    Expect(!InitializeDefaultFavorites(snapshot, favorites) && !favorites.favorites_initialized, "usage-only startup leaves defaults pending");
+    snapshot.sensors[0].kind = SensorKind::temperature;
+    wcscpy_s(snapshot.sensors[0].name.data(), snapshot.sensors[0].name.size(), L"Core (Tctl/Tdie)");
+    Expect(InitializeDefaultFavorites(snapshot, favorites) && favorites.IsFavorite(1), "delayed CPU default appears");
+    Expect(favorites.RemoveFavorite(1), "default can be removed while another category is pending");
+    Expect(!InitializeDefaultFavorites(snapshot, favorites) && !favorites.IsFavorite(1), "removed completed category stays removed");
+
+    const auto path = std::filesystem::temp_directory_path() / (L"HardwareScope-repair-" + std::to_wstring(GetCurrentProcessId()) + L".ini");
+    {
+        AsyncSettingsWriter writer(path);
+        AppSettings settings;
+        for (unsigned i = 0; i < 100; ++i) { settings.refresh_interval_ms = 100 + i; writer.Request(settings); }
+    }
+    SettingsStore store(path);
+    AppSettings loaded;
+    Expect(store.Load(loaded) && loaded.refresh_interval_ms == 199, "bounded async settings writer flushes latest value on destruction");
+    { std::ofstream file(path, std::ios::binary | std::ios::trunc); file << "schema_version=1\neasy_temperature_enabled=false\n"; }
+    Expect(store.Load(loaded) && !loaded.favorites_only, "missing Favorites key preserves EZ Temp migration");
+    { std::ofstream file(path, std::ios::binary | std::ios::trunc); file << std::string(300U * 1024U, 'x'); }
+    loaded.refresh_interval_ms = 123;
+    Expect(!store.Load(loaded) && loaded.refresh_interval_ms == 123, "oversized import is rejected without changing destination");
+    std::filesystem::remove(path);
+
+    SnapshotStore snapshots;
+    SensorWorker worker(snapshots, nullptr, nullptr);
+    worker.Start(std::chrono::milliseconds{10000});
+    std::this_thread::sleep_for(std::chrono::milliseconds{40});
+    const auto before = snapshots.LatestSequence();
+    worker.ConfigureFps(false, true, 100, 500);
+    worker.ConfigureInterval(std::chrono::milliseconds{100});
+    for (int attempt = 0; attempt < 100 && snapshots.LatestSequence() <= before + 1U; ++attempt)
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    Expect(snapshots.LatestSequence() > before + 1U, "live polling change wakes the worker without restarting or resetting sequence");
+    worker.Stop();
+    Expect(!worker.Running(), "worker stop joins safely");
+    Expect(!IsKnownGameExecutable(L"Notes.exe", L"D:\\Games\\Notes.exe"), "generic Games directory is not sufficient game evidence");
+}
+
 void BenchmarkSnapshotStore() {
     hardwarescope::SnapshotStore store;
     hardwarescope::SensorSnapshot snapshot{};
@@ -910,6 +1035,7 @@ int main() {
     TestVerifiedFileLock();
     TestMonitoringControl();
     TestLegacySettingsMigration();
+    TestRepairRegressions();
     TestSensorExplanations();
     BenchmarkSnapshotStore();
     if (failures != 0) {
