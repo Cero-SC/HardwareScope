@@ -94,20 +94,37 @@ double Number(const std::string_view text) noexcept {
 } // namespace
 
 std::optional<PresentMonCsvSample> PresentMonCsvStream::Consume(
-    const std::string_view line, const std::uint32_t process_id, const std::uint64_t now) noexcept {
+    const std::string_view line, const std::uint32_t process_id, const std::uint64_t now,
+    const std::uint64_t qpc_now, const std::uint64_t qpc_frequency) noexcept {
     const auto columns = Columns(line);
     if (interval_column_ == std::string_view::npos) {
         for (std::size_t index{}; index < columns.size(); ++index) {
             if (EqualsInsensitive(columns[index], "MsBetweenPresents")) interval_column_ = index;
             if (EqualsInsensitive(columns[index], "ProcessID")) process_column_ = index;
             if (EqualsInsensitive(columns[index], "SwapChainAddress")) chain_column_ = index;
+            if (EqualsInsensitive(columns[index], "TimeInQPC")) qpc_column_ = index;
         }
-        if (process_column_ == std::string_view::npos || chain_column_ == std::string_view::npos)
+        if (process_column_ == std::string_view::npos || chain_column_ == std::string_view::npos
+            || (qpc_frequency != 0U && qpc_column_ == std::string_view::npos))
             interval_column_ = std::string_view::npos;
         return std::nullopt;
     }
     if (std::max({interval_column_, process_column_, chain_column_}) >= columns.size()) return std::nullopt;
     if (Number(columns[process_column_]) != static_cast<double>(process_id)) return std::nullopt;
+    auto present_tick = now;
+    std::uint64_t event_qpc{};
+    bool stale{};
+    if (qpc_frequency != 0U) {
+        if (qpc_column_ >= columns.size()) return std::nullopt;
+        const auto field = columns[qpc_column_];
+        const auto timestamp = std::from_chars(field.data(), field.data() + field.size(), event_qpc);
+        if (timestamp.ec != std::errc{} || timestamp.ptr != field.data() + field.size()
+            || event_qpc == 0U || event_qpc > qpc_now) return std::nullopt;
+        const auto age_ms = static_cast<double>(qpc_now - event_qpc) * 1'000.0 / static_cast<double>(qpc_frequency);
+        if (age_ms > static_cast<double>(now)) return std::nullopt;
+        stale = age_ms > 2'500.0;
+        if (!stale) present_tick -= static_cast<std::uint64_t>(age_ms);
+    }
     const auto milliseconds = Number(columns[interval_column_]);
     // Keep real hitches. Intervals exceeding the entire 60s history are capture
     // discontinuities and reset the stream rather than silently bias its lows.
@@ -118,6 +135,10 @@ std::optional<PresentMonCsvSample> PresentMonCsvStream::Consume(
     std::uint64_t chain{};
     const auto parsed = std::from_chars(chain_text.data(), chain_text.data() + chain_text.size(), chain, base);
     if (parsed.ec != std::errc{} || parsed.ptr != chain_text.data() + chain_text.size() || chain == 0U) return std::nullopt;
+    if (stale) {
+        if (chain == selected_) reset_pending_ = true;
+        return std::nullopt;
+    }
     if (milliseconds > 60'000.0) {
         if (chain == selected_) reset_pending_ = true;
         return std::nullopt;
@@ -142,7 +163,7 @@ std::optional<PresentMonCsvSample> PresentMonCsvStream::Consume(
     last_selected_tick_ = now;
     const auto reset = reset_pending_;
     reset_pending_ = false;
-    return PresentMonCsvSample{milliseconds, reset};
+    return PresentMonCsvSample{milliseconds, reset, present_tick, event_qpc};
 }
 
 std::uint32_t CalculateOnePercentLowFps(double* const intervals, const std::size_t count) noexcept {
@@ -200,7 +221,7 @@ void PresentMonFpsRunner::Start(const std::uint32_t process_id) noexcept {
         FILE_ATTRIBUTE_NORMAL, nullptr);
 
     std::wstring command = L"\"" + runtime + L"\" --process_id " + std::to_wstring(process_id)
-        + L" --output_stdout --no_console_stats --qpc_time_ms --no_track_display --no_track_gpu --no_track_input"
+        + L" --output_stdout --no_console_stats --qpc_time --no_track_display --no_track_gpu --no_track_input"
           L" --terminate_on_proc_exit --stop_existing_session --session_name " + kSessionName;
     STARTUPINFOW startup{sizeof(startup)};
     startup.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
@@ -231,6 +252,8 @@ void PresentMonFpsRunner::Start(const std::uint32_t process_id) noexcept {
 }
 
 void PresentMonFpsRunner::ReadOutput(const std::stop_token token, const HANDLE pipe, const std::uint32_t process_id) noexcept {
+    LARGE_INTEGER frequency{};
+    if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0) return;
     std::array<wchar_t, 32'768U> diagnostic_path{};
     const auto diagnostic_length = GetEnvironmentVariableW(
         L"HARDWARESCOPE_FPS_DIAGNOSTIC", diagnostic_path.data(), static_cast<DWORD>(diagnostic_path.size()));
@@ -279,8 +302,13 @@ void PresentMonFpsRunner::ReadOutput(const std::stop_token token, const HANDLE p
         while ((newline = pending.find('\n')) != std::string::npos) {
             auto line = std::string_view{pending.data(), newline};
             if (!line.empty() && line.back() == '\r') line.remove_suffix(1U);
-            if (const auto sample = csv.Consume(line, process_id, GetTickCount64()))
-                RecordInterval(sample->milliseconds, process_id, sample->new_stream);
+            const auto receipt_tick = GetTickCount64();
+            LARGE_INTEGER receipt_qpc{};
+            if (QueryPerformanceCounter(&receipt_qpc)) {
+                if (const auto sample = csv.Consume(line, process_id, receipt_tick,
+                    static_cast<std::uint64_t>(receipt_qpc.QuadPart), static_cast<std::uint64_t>(frequency.QuadPart)))
+                    RecordInterval(sample->milliseconds, process_id, sample->new_stream, sample->present_tick_milliseconds, sample->present_qpc);
+            }
             pending.erase(0U, newline + 1U);
         }
         if (pending.size() > 64U * 1024U) break; // bounded malformed/unterminated line
@@ -288,10 +316,14 @@ void PresentMonFpsRunner::ReadOutput(const std::stop_token token, const HANDLE p
     if (diagnostic != INVALID_HANDLE_VALUE) CloseHandle(diagnostic);
 }
 
-void PresentMonFpsRunner::RecordInterval(const double milliseconds, const std::uint32_t process_id, const bool new_stream) noexcept {
+void PresentMonFpsRunner::RecordInterval(const double milliseconds, const std::uint32_t process_id, const bool new_stream,
+    const std::uint64_t present_tick, const std::uint64_t present_qpc) noexcept {
     if (!std::isfinite(milliseconds) || milliseconds <= 0.05 || milliseconds > kHistoryMilliseconds
         || process_id != target_process_id_.load(std::memory_order_acquire)) return;
     const std::scoped_lock lock(mutex_);
+    // Order with the original high-resolution clock, not GetTickCount64's
+    // coarser mapped milliseconds, which can round neighboring frames backward.
+    if (!new_stream && interval_count_ != 0U && present_qpc < last_frame_qpc_) return;
     if (new_stream) {
         interval_first_ = interval_count_ = 0U;
         interval_total_ = 0.0;
@@ -312,7 +344,8 @@ void PresentMonFpsRunner::RecordInterval(const double milliseconds, const std::u
         interval_first_ = (interval_first_ + 1U) % intervals_.size();
         --interval_count_;
     }
-    last_frame_tick_ = GetTickCount64();
+    last_frame_tick_ = new_stream ? present_tick : std::max(last_frame_tick_, present_tick);
+    last_frame_qpc_ = present_qpc;
 }
 
 PresentMonFpsReading PresentMonFpsRunner::Snapshot() const noexcept {

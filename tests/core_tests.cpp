@@ -181,6 +181,28 @@ void TestSensorPublishCadence() {
         "disabled FPS never accelerates sensor publishing");
 }
 
+void TestFpsEventFreshness() {
+    using namespace hardwarescope;
+    PresentMonCsvStream csv;
+    // Real field names verified by offline replay of upstream v2.4.1's trace.
+    constexpr auto header = "Application,ProcessID,SwapChainAddress,TimeInQPC,CPUStartQPC,MsBetweenPresents";
+    static_cast<void>(csv.Consume(header, 42, 10000, 100000, 10000));
+    auto frame = csv.Consume("game.exe,42,0xA,99500,50000,4000", 42, 10000, 100000, 10000);
+    Expect(frame && frame->milliseconds == 4000 && frame->present_tick_milliseconds == 9950,
+        "fresh Present timestamp keeps a genuine four-second hitch despite an old CPU-start timestamp");
+    Expect(!csv.Consume("game.exe,42,0xB,60000,50000,10", 42, 10000, 100000, 10000), "buffered foreign frame is not fresh");
+    frame = csv.Consume("game.exe,42,0xA,100000,99900,10", 42, 10000, 100000, 10000);
+    Expect(frame && !frame->new_stream, "stale foreign stream cannot reset selected history");
+    Expect(!csv.Consume("game.exe,42,0xA,60000,50000,10", 42, 10000, 100000, 10000), "buffered selected frame is rejected");
+    frame = csv.Consume("game.exe,42,0xA,100000,99900,10", 42, 10000, 100000, 10000);
+    Expect(frame && frame->new_stream, "fresh recovery after skipped stale data resets statistics");
+    Expect(!csv.Consume("game.exe,42,0xA,100001,99900,10", 42, 10000, 100000, 10000), "future event timestamp rejected");
+    Expect(!csv.Consume("game.exe,42,0xA,nan,99900,10", 42, 10000, 100000, 10000), "malformed timestamp rejected");
+    PresentMonCsvStream missing;
+    static_cast<void>(missing.Consume("ProcessID,SwapChainAddress,MsBetweenPresents", 42, 10000, 100000, 10000));
+    Expect(!missing.Consume("42,0xA,10", 42, 10000, 100000, 10000), "production freshness mode refuses a header without Present QPC time");
+}
+
 void TestGraphOutageClock() {
     using namespace hardwarescope;
     AppSettings settings;
@@ -1055,6 +1077,7 @@ int main() {
     TestSensorPublishCadence();
     TestGraphHistory();
     TestGraphOutageClock();
+    TestFpsEventFreshness();
     TestSettingsStore();
     TestOsdModel();
     TestProcessorUsageMath();

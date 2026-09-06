@@ -26,7 +26,11 @@ FPS streams are selected using bounded recent present counts with hysteresis and
 a cessation fallback. Switching streams resets statistics. Valid long intervals
 up to the 60-second history length are retained; larger intervals are treated as
 capture discontinuities. These are presentation FPS, not a promise of displayed
-or generated frames. Buffered-output timestamp validation still needs qualification.
+or generated frames. Production parsing uses PresentMon's raw `TimeInQPC`
+presentation timestamp to reject buffered rows older than 2.5 seconds, rather
+than treating pipe arrival as a fresh frame. Deterministic freshness tests and
+offline output-contract replay pass; live-game accuracy remains unqualified.
+See [the qualification status](QUALIFICATION_STATUS.md) for evidence and scope.
 
 Keyboard shortcuts, larger text, high-contrast palettes and native settings
 controls exist; full sensor-row UIA/Narrator support is not yet qualified.
