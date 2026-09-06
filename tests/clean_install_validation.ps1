@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][string]$InstallerPath, [string]$PreviousInstallerPath)
+param([Parameter(Mandatory)][string]$InstallerPath, [string]$PreviousInstallerPath, [string]$ProductionUiProbePath)
 $ErrorActionPreference = 'Stop'
 # Destructive package tests are restricted to a disposable GitHub-hosted runner.
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
@@ -50,13 +50,36 @@ foreach ($scenario in @('clean', $secondScenario)) {
         $settingsDirectory = Join-Path $env:LOCALAPPDATA 'HardwareScope'
         New-Item -ItemType Directory -Path $settingsDirectory -Force | Out-Null
         $settingsPath = Join-Path $settingsDirectory 'settings-v2.ini'
-        [IO.File]::WriteAllText($settingsPath, "schema_version=7`nrefresh_interval_ms=1250`ntext_color_rgb=52E0D4`n")
+        [IO.File]::WriteAllText($settingsPath, "schema_version=7`nrefresh_interval_ms=1250`ntext_color_rgb=52E0D4`nonboarding_completed=true`nautomatic_updates=false`nstart_with_windows=false`nstart_minimized=false`nshow_osd=false`n")
         $settingsHash = (Get-FileHash -LiteralPath $settingsPath -Algorithm SHA256).Hash
     } elseif ($PreviousInstallerPath -and $scenario -eq 'upgrade') {
         if ((Get-FileHash -LiteralPath $settingsPath -Algorithm SHA256).Hash -ne $settingsHash) {
             throw 'Historical upgrade changed or removed the existing user settings file.'
         }
         Write-Output 'PASS historical upgrade: application/service/updater versions advanced and existing user settings preserved.'
+    }
+}
+if ($ProductionUiProbePath) {
+    $probePath = (Resolve-Path -LiteralPath $ProductionUiProbePath).Path
+    $app = $null
+    $probe = $null
+    try {
+        # Only launch and clean up our own candidate process on this disposable runner.
+        $app = Start-Process -FilePath (Join-Path $installDirectory 'HardwareScope.exe') -PassThru
+        if (-not $app.WaitForInputIdle(15000)) { throw 'Packaged application did not become idle.' }
+        $probe = Start-Process -FilePath $probePath -ArgumentList @('--expect-no-hooks', '--pid', $app.Id) -WindowStyle Hidden -PassThru
+        if (-not $probe.WaitForExit(30000)) { throw 'Packaged UI boundary check timed out.' }
+        if ($probe.ExitCode -ne 0) { throw "Packaged UI boundary check failed: $($probe.ExitCode)" }
+        Write-Output 'PASS production UI: packaged main/settings windows expose no internal test messages; Settings opens and closes.'
+    } finally {
+        foreach ($ownedProcess in @($probe, $app)) {
+            if ($ownedProcess -and -not $ownedProcess.HasExited) {
+                if (-not $ownedProcess.CloseMainWindow() -or -not $ownedProcess.WaitForExit(5000)) { $ownedProcess.Kill(); $ownedProcess.WaitForExit() }
+            }
+            if ($ownedProcess) { $ownedProcess.Dispose() }
+        }
+        $probeLog = Join-Path $env:TEMP 'HardwareScopeNativeUiSmokeTests.log'
+        if (Test-Path -LiteralPath $probeLog) { Copy-Item -LiteralPath $probeLog -Destination (Join-Path $env:RUNNER_TEMP 'HardwareScope-production-ui.log') }
     }
 }
 Invoke-Package (Join-Path $installDirectory 'unins000.exe') @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')

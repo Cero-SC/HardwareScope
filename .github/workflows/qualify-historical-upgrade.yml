@@ -18,6 +18,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
+      - name: Build external production UI boundary probe
+        shell: pwsh
+        run: |
+          cmake -S . -B out/qualification-probe -A x64
+          if ($LASTEXITCODE -ne 0) { throw 'Probe configuration failed.' }
+          cmake --build out/qualification-probe --config Release --target HardwareScopeNativeUiSmokeTests
+          if ($LASTEXITCODE -ne 0) { throw 'Probe build failed.' }
       - name: Download and verify exact baseline and candidate installers
         shell: pwsh
         env:
@@ -54,7 +61,7 @@ jobs:
           }
           $candidate = Join-Path $env:RUNNER_TEMP "qualification-$candidateVersion/HardwareScope-Setup-$candidateVersion-x64.exe"
           $baseline = Join-Path $env:RUNNER_TEMP 'qualification-2.0.12/HardwareScope-Setup-2.0.12-x64.exe'
-          ./tests/clean_install_validation.ps1 -InstallerPath $candidate -PreviousInstallerPath $baseline
+          ./tests/clean_install_validation.ps1 -InstallerPath $candidate -PreviousInstallerPath $baseline -ProductionUiProbePath './out/qualification-probe/Release/HardwareScopeNativeUiSmokeTests.exe'
       - name: Retain qualification logs
         if: always()
         uses: actions/upload-artifact@v4
