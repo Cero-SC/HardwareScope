@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   historical-upgrade:
@@ -30,13 +31,25 @@ jobs:
           foreach ($version in @('2.0.12', $candidateVersion)) {
             $directory = Join-Path $env:RUNNER_TEMP "qualification-$version"
             $name = "HardwareScope-Setup-$version-x64.exe"
-            gh release download "v$version" --repo $env:GITHUB_REPOSITORY --pattern $name --pattern SHA256SUMS.txt --dir $directory
+            if ($version -eq '2.0.12') {
+              gh release download "v$version" --repo $env:GITHUB_REPOSITORY --pattern $name --pattern SHA256SUMS.txt --dir $directory
+            } else {
+              # Read-only workflow tokens cannot see private draft releases.
+              # Use the successful tagged build's retained artifact, whose bytes
+              # are also uploaded to the draft (no rebuild or write permission).
+              $commit = gh api "repos/$env:GITHUB_REPOSITORY/commits/v$version" --jq .sha
+              if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve candidate commit.' }
+              $runs = @(gh run list --repo $env:GITHUB_REPOSITORY --workflow release.yml --commit $commit --status success --limit 1 --json databaseId | ConvertFrom-Json)
+              if ($LASTEXITCODE -ne 0 -or $runs.Count -ne 1) { throw 'No successful tagged candidate build.' }
+              gh run download $runs[0].databaseId --repo $env:GITHUB_REPOSITORY --name "HardwareScope-$version-x64" --dir $directory
+            }
             if ($LASTEXITCODE -ne 0) { throw "Could not download $version" }
             $file = Join-Path $directory $name
             $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
             $lines = @(Get-Content -LiteralPath (Join-Path $directory 'SHA256SUMS.txt') | Where-Object { $_ -match ('^[0-9a-fA-F]{64}\s+\*?' + [regex]::Escape($name) + '$') })
             if ($lines.Count -ne 1 -or $hash -ine ($lines[0] -split '\s+')[0]) { throw "Checksum mismatch for $version" }
             if ($version -eq '2.0.12' -and $hash -ne 'A3B3C0E13C84C35590C69C9416E5D7A3171AA5BE07A4E7C8F235A3FEF0FDD5C9') { throw 'Baseline bytes have changed.' }
+            if ($version -eq '2.0.14' -and $hash -ne 'EA098084F5C73B7B3C5C6D81D3A78EFF392B14B58860FE76311B278A3CDA138C') { throw 'Artifact differs from verified draft installer.' }
             "VERIFIED $version SHA256 $hash" | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'HardwareScope-upgrade-hashes.log') -Append
           }
           $candidate = Join-Path $env:RUNNER_TEMP "qualification-$candidateVersion/HardwareScope-Setup-$candidateVersion-x64.exe"
