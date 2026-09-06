@@ -169,12 +169,50 @@ void TestSensorWorker() {
 
 void TestSensorPublishCadence() {
     using namespace std::chrono_literals;
-    Expect(hardwarescope::SelectSensorPublishInterval(750ms, 100U, true, true, false) == 750ms,
-        "game-only FPS keeps the desktop on the lightweight hardware cadence");
+    Expect(hardwarescope::SelectSensorPublishInterval(750ms, 100U, true, true, false) == 500ms,
+        "FPS discovery uses a bounded 500ms probe rather than the fast frame cadence");
+    Expect(hardwarescope::SelectSensorPublishInterval(10000ms, 50U, true, true, false) == 500ms,
+        "slow hardware polling does not delay first-frame discovery by ten seconds");
+    Expect(hardwarescope::SelectSensorPublishInterval(100ms, 50U, true, false, false) == 100ms,
+        "discovery never slows an already faster hardware cadence");
     Expect(hardwarescope::SelectSensorPublishInterval(750ms, 100U, true, true, true) == 100ms,
         "a real game FPS sample switches publishing to the independent low-latency cadence");
     Expect(hardwarescope::SelectSensorPublishInterval(750ms, 100U, false, true, true) == 750ms,
         "disabled FPS never accelerates sensor publishing");
+}
+
+void TestGraphOutageClock() {
+    using namespace hardwarescope;
+    AppSettings settings;
+    settings.osd_graph_sensor_count = 1;
+    settings.osd_graph_sensor_ids[0] = 1;
+    settings.osd_graph_history_seconds = 5;
+    settings.refresh_interval_ms = 750;
+    const auto history = std::make_unique<GraphHistory>();
+    const auto snapshot = std::make_unique<SensorSnapshot>();
+    history->Configure(settings);
+    snapshot->count = 1; snapshot->sequence = 1;
+    snapshot->sensors[0].id = 1; snapshot->sensors[0].unit = SensorUnit::celsius;
+    snapshot->sensors[0].available = true; snapshot->sensors[0].current = 42.0;
+    history->Update(*snapshot, 1000);
+    static_cast<void>(history->AdvanceTime(3000));
+    Expect(history->Series(0).available, "graph tolerates normal producer jitter");
+    static_cast<void>(history->AdvanceTime(3500));
+    Expect(!history->Series(0).available && history->Series(0).count == 1,
+        "outage clock marks last value unavailable without manufacturing samples");
+    history->SetPaused(true);
+    Expect(!history->AdvanceTime(9000) && history->LatestTick() == 3500, "explicit graph pause freezes the clock");
+    history->SetPaused(false);
+    static_cast<void>(history->AdvanceTime(9000));
+    Expect(history->Series(0).count == 0, "timer-only aging expires history with no producer callbacks");
+    snapshot->sequence = 2; history->Update(*snapshot, 10000);
+    Expect(history->Series(0).count == 1 && history->Series(0).BreakBefore(0), "outage recovery starts a new line segment");
+    settings.refresh_interval_ms = 10000; settings.osd_graph_history_seconds = 60;
+    history->Configure(settings); snapshot->sequence = 3; history->Update(*snapshot, 1000);
+    static_cast<void>(history->AdvanceTime(11000));
+    Expect(history->Series(0).available, "ten-second polling does not falsely stale at the fast graph interval");
+    static_cast<void>(history->AdvanceTime(21000));
+    Expect(!history->Series(0).available, "slow producer still has a bounded outage deadline");
 }
 
 void TestGraphHistory() {
@@ -1016,6 +1054,7 @@ int main() {
     TestSensorWorker();
     TestSensorPublishCadence();
     TestGraphHistory();
+    TestGraphOutageClock();
     TestSettingsStore();
     TestOsdModel();
     TestProcessorUsageMath();

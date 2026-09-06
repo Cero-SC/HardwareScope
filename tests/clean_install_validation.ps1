@@ -34,6 +34,11 @@ foreach ($scenario in @('clean', $secondScenario)) {
     $service = Get-Service HardwareScopeSensorService
     $service.WaitForStatus('Running', [TimeSpan]::FromSeconds(20))
     if ($service.StartType -ne 'Automatic') { throw 'Sensor service is not automatic.' }
+    $expectedVersion = [version]((Get-Item -LiteralPath $scenarioInstaller).VersionInfo.ProductVersion.Trim([char]0).Trim())
+    foreach ($binary in @('HardwareScope.exe', 'HardwareScopeSensorService.exe', 'HardwareScopeUpdater.exe')) {
+        $actualVersion = [version]((Get-Item -LiteralPath (Join-Path $installDirectory $binary)).VersionInfo.ProductVersion.Trim([char]0).Trim())
+        if ($actualVersion -ne $expectedVersion) { throw "Wrong installed version for ${binary}: $actualVersion instead of $expectedVersion" }
+    }
     Invoke-Package (Join-Path $installDirectory 'HardwareScopeSensorService.exe') @('--check-runtime')
     if (-not (Test-Path -LiteralPath (Join-Path $pawnDirectory 'PawnIOLib.dll'))) { throw 'PawnIO runtime missing.' }
     if ((Get-AuthenticodeSignature -LiteralPath (Join-Path $pawnDirectory 'PawnIOLib.dll')).Status -ne 'Valid') {
@@ -41,6 +46,18 @@ foreach ($scenario in @('clean', $secondScenario)) {
     }
     if (-not (Test-Path -LiteralPath (Join-Path $installDirectory 'PawnIO-Modules-COPYING.txt'))) { throw 'Module license missing.' }
     Write-Output "PASS $scenario install: signed prerequisite, driver opens, service running."
+    if ($PreviousInstallerPath -and $scenario -eq 'clean') {
+        $settingsDirectory = Join-Path $env:LOCALAPPDATA 'HardwareScope'
+        New-Item -ItemType Directory -Path $settingsDirectory -Force | Out-Null
+        $settingsPath = Join-Path $settingsDirectory 'settings-v2.ini'
+        [IO.File]::WriteAllText($settingsPath, "schema_version=7`nrefresh_interval_ms=1250`ntext_color_rgb=52E0D4`n")
+        $settingsHash = (Get-FileHash -LiteralPath $settingsPath -Algorithm SHA256).Hash
+    } elseif ($PreviousInstallerPath -and $scenario -eq 'upgrade') {
+        if ((Get-FileHash -LiteralPath $settingsPath -Algorithm SHA256).Hash -ne $settingsHash) {
+            throw 'Historical upgrade changed or removed the existing user settings file.'
+        }
+        Write-Output 'PASS historical upgrade: application/service/updater versions advanced and existing user settings preserved.'
+    }
 }
 Invoke-Package (Join-Path $installDirectory 'unins000.exe') @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
 if (Get-Service HardwareScopeSensorService -ErrorAction SilentlyContinue) { throw 'Service remains after uninstall.' }

@@ -40,6 +40,8 @@ public:
 
     void Configure(const AppSettings& settings) noexcept;
     void Update(const SensorSnapshot& snapshot, std::uint64_t tick_milliseconds) noexcept;
+    // Ages existing history without inventing a sensor sample during an outage.
+    [[nodiscard]] bool AdvanceTime(std::uint64_t tick_milliseconds) noexcept;
     void Clear() noexcept;
     void SetPaused(bool paused) noexcept { paused_ = paused; }
     [[nodiscard]] bool Paused() const noexcept { return paused_; }
@@ -67,6 +69,8 @@ private:
     std::uint64_t last_snapshot_sequence_{};
     std::uint64_t last_sample_tick_{};
     std::uint64_t latest_tick_{};
+    std::uint64_t last_snapshot_tick_{};
+    std::uint64_t stale_after_milliseconds_{2'500U};
 };
 
 [[nodiscard]] const wchar_t* GraphUnitSuffix(SensorUnit unit) noexcept;

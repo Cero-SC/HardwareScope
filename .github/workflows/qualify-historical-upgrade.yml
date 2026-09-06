@@ -1,0 +1,51 @@
+name: Qualify historical installer upgrade
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_tag:
+        description: Existing candidate tag to qualify (assets are downloaded, never rebuilt)
+        required: true
+        default: v2.0.14
+
+permissions:
+  contents: read
+
+jobs:
+  historical-upgrade:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Download and verify exact baseline and candidate installers
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:CANDIDATE_TAG -notmatch '^v(?<version>[0-9]+\.[0-9]+\.[0-9]+)$') { throw 'Invalid candidate tag.' }
+          $candidateVersion = $Matches.version
+          if ([version]$candidateVersion -le [version]'2.0.12') { throw 'Candidate must be newer than baseline 2.0.12.' }
+          foreach ($version in @('2.0.12', $candidateVersion)) {
+            $directory = Join-Path $env:RUNNER_TEMP "qualification-$version"
+            $name = "HardwareScope-Setup-$version-x64.exe"
+            gh release download "v$version" --repo $env:GITHUB_REPOSITORY --pattern $name --pattern SHA256SUMS.txt --dir $directory
+            if ($LASTEXITCODE -ne 0) { throw "Could not download $version" }
+            $file = Join-Path $directory $name
+            $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+            $lines = @(Get-Content -LiteralPath (Join-Path $directory 'SHA256SUMS.txt') | Where-Object { $_ -match ('^[0-9a-fA-F]{64}\s+\*?' + [regex]::Escape($name) + '$') })
+            if ($lines.Count -ne 1 -or $hash -ine ($lines[0] -split '\s+')[0]) { throw "Checksum mismatch for $version" }
+            if ($version -eq '2.0.12' -and $hash -ne 'A3B3C0E13C84C35590C69C9416E5D7A3171AA5BE07A4E7C8F235A3FEF0FDD5C9') { throw 'Baseline bytes have changed.' }
+            "VERIFIED $version SHA256 $hash" | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'HardwareScope-upgrade-hashes.log') -Append
+          }
+          $candidate = Join-Path $env:RUNNER_TEMP "qualification-$candidateVersion/HardwareScope-Setup-$candidateVersion-x64.exe"
+          $baseline = Join-Path $env:RUNNER_TEMP 'qualification-2.0.12/HardwareScope-Setup-2.0.12-x64.exe'
+          ./tests/clean_install_validation.ps1 -InstallerPath $candidate -PreviousInstallerPath $baseline
+      - name: Retain qualification logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: historical-upgrade-evidence
+          path: ${{ runner.temp }}/HardwareScope-*.log
+          if-no-files-found: error

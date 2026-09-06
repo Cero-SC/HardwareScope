@@ -62,9 +62,12 @@ std::chrono::milliseconds SelectSensorPublishInterval(
     const std::chrono::milliseconds hardware_interval,
     const std::uint32_t fps_refresh_interval_ms,
     const bool fps_enabled,
-    const bool fps_game_only,
+    const bool /*fps_game_only*/,
     const bool frame_rate_available) noexcept {
-    if (!fps_enabled || (fps_game_only && !frame_rate_available)) return hardware_interval;
+    if (!fps_enabled) return hardware_interval;
+    // Probe for a game / first frame at a bounded cadence independent of slow
+    // hardware reads. Actual hardware collection still follows its own deadline.
+    if (!frame_rate_available) return std::min(hardware_interval, std::chrono::milliseconds{500});
     return std::min(hardware_interval, std::chrono::milliseconds{fps_refresh_interval_ms});
 }
 

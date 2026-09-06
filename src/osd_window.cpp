@@ -11,6 +11,7 @@
 
 namespace hardwarescope {
 namespace {
+constexpr UINT_PTR kGraphAgeTimer = 0x48534F41U;
 
 SIZE TextSize(const HDC dc, const HFONT font, const std::wstring& text) noexcept {
     const auto previous = SelectObject(dc, font);
@@ -48,11 +49,13 @@ bool OsdWindow::Initialize(const HWND monitor_anchor, const AppSettings& setting
         nullptr,
         nullptr,
         instance_,
-        nullptr);
+        this);
     if (window_ == nullptr) return false;
     static_cast<void>(RefreshDpi());
     RecreateFonts();
     visible_ = settings_.show_osd;
+    graph_history_.Configure(settings_);
+    ConfigureGraphTimer();
     return true;
 }
 
@@ -88,6 +91,17 @@ const wchar_t* OsdWindow::WindowClassName() const noexcept {
 }
 
 LRESULT CALLBACK OsdWindow::WindowProcedure(const HWND window, const UINT message, const WPARAM wparam, const LPARAM lparam) noexcept {
+    if (message == WM_NCCREATE) {
+        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lparam);
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+    }
+    auto* self = reinterpret_cast<OsdWindow*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (message == WM_TIMER && wparam == kGraphAgeTimer && self != nullptr) {
+        const auto now = GetTickCount64();
+        if (self->visible_ && self->GraphBelongsOnThisSurface()
+            && now >= self->graph_history_.LatestTick() + 500U && self->graph_history_.AdvanceTime(now)) self->Render();
+        return 0;
+    }
     if (message == WM_NCHITTEST) return HTTRANSPARENT;
     if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
     return DefWindowProcW(window, message, wparam, lparam);
@@ -101,7 +115,14 @@ void OsdWindow::ApplySettings(const AppSettings& settings) noexcept {
     graph_history_.Configure(settings_);
     if (!settings_.osd_graph_enabled) graph_history_.Clear();
     visible_ = settings_.show_osd;
+    ConfigureGraphTimer();
     Render();
+}
+
+void OsdWindow::ConfigureGraphTimer() noexcept {
+    if (window_ == nullptr) return;
+    if (visible_ && GraphBelongsOnThisSurface()) SetTimer(window_, kGraphAgeTimer, 1'000U, nullptr);
+    else KillTimer(window_, kGraphAgeTimer);
 }
 
 void OsdWindow::Update(const SensorSnapshot& snapshot) noexcept {
@@ -112,6 +133,7 @@ void OsdWindow::Update(const SensorSnapshot& snapshot) noexcept {
 
 void OsdWindow::SetVisible(const bool visible) noexcept {
     visible_ = visible;
+    ConfigureGraphTimer();
     if (!visible_ && window_ != nullptr) ShowWindow(window_, SW_HIDE);
     else Render();
 }

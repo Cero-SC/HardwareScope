@@ -14,6 +14,7 @@
 
 namespace hardwarescope {
 namespace {
+constexpr UINT_PTR kGraphAgeTimer = 0x48534741U;
 
 COLORREF WinColor(const std::uint32_t rgb) noexcept {
     return RGB((rgb >> 16U) & 0xFFU, (rgb >> 8U) & 0xFFU, rgb & 0xFFU);
@@ -152,6 +153,18 @@ LRESULT CALLBACK GraphWindow::StaticWindowProcedure(const HWND window, const UIN
 
 LRESULT GraphWindow::WindowProcedure(const UINT message, const WPARAM wparam, const LPARAM lparam) noexcept {
     switch (message) {
+    case WM_SHOWWINDOW:
+        if (wparam) SetTimer(window_, kGraphAgeTimer, 1'000U, nullptr);
+        else KillTimer(window_, kGraphAgeTimer);
+        break;
+    case WM_TIMER:
+        if (wparam == kGraphAgeTimer && !IsIconic(window_)) {
+            const auto now = GetTickCount64();
+            if (now >= history_.LatestTick() + 500U && history_.AdvanceTime(now))
+                InvalidateRect(window_, nullptr, FALSE);
+            return 0;
+        }
+        break;
     case WM_ERASEBKGND: return 1;
     case WM_PAINT: {
         PAINTSTRUCT paint{};

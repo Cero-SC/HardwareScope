@@ -49,6 +49,7 @@ void GraphHistory::Configure(const AppSettings& settings) noexcept {
     series_count_ = next_count;
     history_seconds_ = settings.osd_graph_history_seconds;
     refresh_milliseconds_ = settings.osd_graph_refresh_interval_ms;
+    stale_after_milliseconds_ = std::max<std::uint64_t>(2'500U, static_cast<std::uint64_t>(settings.refresh_interval_ms) * 2U);
     scale_mode_ = settings.osd_graph_scale_mode;
     custom_minimum_ = settings.osd_graph_custom_minimum;
     custom_maximum_ = settings.osd_graph_custom_maximum;
@@ -56,18 +57,32 @@ void GraphHistory::Configure(const AppSettings& settings) noexcept {
     if (sources_changed || timing_changed || scale_changed) adaptive_initialized_ = false;
 }
 
-void GraphHistory::Update(const SensorSnapshot& snapshot, const std::uint64_t tick_milliseconds) noexcept {
-    if (paused_ || series_count_ == 0U) return;
+bool GraphHistory::AdvanceTime(const std::uint64_t tick_milliseconds) noexcept {
+    if (paused_ || series_count_ == 0U || tick_milliseconds < latest_tick_) return false;
+    bool changed{};
     latest_tick_ = tick_milliseconds;
     for (auto& series : series_) {
+        changed = changed || series.count != 0U || series.available;
         while (series.count != 0U && tick_milliseconds >= series.Timestamp(0U)
             && tick_milliseconds - series.Timestamp(0U) >= static_cast<std::uint64_t>(history_seconds_) * 1'000U) {
             series.first = (series.first + 1U) % series.samples.size();
             --series.count;
         }
+        if (last_snapshot_sequence_ != 0U && tick_milliseconds >= last_snapshot_tick_
+            && tick_milliseconds - last_snapshot_tick_ >= stale_after_milliseconds_) {
+            series.available = false;
+            series.gap_pending = true;
+        }
     }
+    return changed;
+}
+
+void GraphHistory::Update(const SensorSnapshot& snapshot, const std::uint64_t tick_milliseconds) noexcept {
+    if (paused_ || series_count_ == 0U || tick_milliseconds < latest_tick_) return;
+    static_cast<void>(AdvanceTime(tick_milliseconds));
     if (snapshot.sequence == 0U || snapshot.sequence == last_snapshot_sequence_) return;
     last_snapshot_sequence_ = snapshot.sequence;
+    last_snapshot_tick_ = tick_milliseconds;
     if (last_sample_tick_ != 0U && tick_milliseconds - last_sample_tick_ < refresh_milliseconds_) return;
     last_sample_tick_ = tick_milliseconds;
     const auto desired = GraphSeries::kMaximumSamples;
@@ -118,6 +133,7 @@ void GraphHistory::Clear() noexcept {
     last_snapshot_sequence_ = 0U;
     last_sample_tick_ = 0U;
     latest_tick_ = 0U;
+    last_snapshot_tick_ = 0U;
     adaptive_initialized_ = false;
 }
 

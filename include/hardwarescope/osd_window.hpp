@@ -44,6 +44,7 @@ private:
     void Render() noexcept;
     void Position(int width, int height) noexcept;
     [[nodiscard]] bool GraphBelongsOnThisSurface() const noexcept;
+    void ConfigureGraphTimer() noexcept;
 
     HINSTANCE instance_{};
     OsdWindowRole role_{OsdWindowRole::primary};
