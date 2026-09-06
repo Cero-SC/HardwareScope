@@ -3,6 +3,7 @@
 #include "hardwarescope/ddr5_temperature_provider.hpp"
 #include "hardwarescope/frame_rate_tracker.hpp"
 #include "hardwarescope/file_verification.hpp"
+#include "hardwarescope/monitoring_control.hpp"
 #include "hardwarescope/game_detector.hpp"
 #include "hardwarescope/graph_model.hpp"
 #include "hardwarescope/legacy_settings_migration.hpp"
@@ -802,6 +803,69 @@ void TestSensorExplanations() {
     Expect(hardwarescope::SensorExplanation(usage).find(L"percentage") != std::wstring::npos, "unrecognized utilization sensors receive a useful generic explanation");
 }
 
+void TestMonitoringControl() {
+    const auto name = L"\\\\.\\pipe\\HardwareScope.ControlTest." + std::to_wstring(GetCurrentProcessId());
+    const auto server = CreateNamedPipeW(name.c_str(), PIPE_ACCESS_OUTBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS,
+        1U, 64U, 64U, 0U, nullptr);
+    Expect(server != INVALID_HANDLE_VALUE, "create isolated control test pipe");
+    if (server == INVALID_HANDLE_VALUE) return;
+    std::array<wchar_t, 32'768U> path{};
+    GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+    HANDLE pending{};
+    DWORD value{};
+    Expect(!hardwarescope::ReadMonitoringControl(pending, name.c_str(), L"C:\\unexpected.exe", &value, sizeof(value))
+        && pending == nullptr, "reject pipe owned by an unexpected executable");
+    DisconnectNamedPipe(server);
+    ConnectNamedPipe(server, nullptr);
+    const auto start = std::chrono::steady_clock::now();
+    for (int index = 0; index < 100; ++index) {
+        Expect(!hardwarescope::ReadMonitoringControl(pending, name.c_str(), path.data(), &value, sizeof(value)),
+            "empty control pipe returns without blocking");
+    }
+    Expect(std::chrono::steady_clock::now() - start < std::chrono::seconds{1}, "stalled sender cannot stall the sensor service");
+    Expect(pending != nullptr, "retain nonblocking connection until next poll");
+    if (pending == nullptr) std::cerr << "Control connection error: " << GetLastError() << '\n';
+    ConnectNamedPipe(server, nullptr);
+    const DWORD expected = 750U;
+    DWORD written{};
+    Expect(WriteFile(server, &expected, sizeof(expected), &written, nullptr) != FALSE, "queue control message");
+    Expect(hardwarescope::ReadMonitoringControl(pending, name.c_str(), path.data(), &value, sizeof(value))
+        && value == expected && pending == nullptr, "deliver queued polling settings and close endpoint");
+    DisconnectNamedPipe(server);
+    ConnectNamedPipe(server, nullptr);
+    Expect(!hardwarescope::ReadMonitoringControl(pending, name.c_str(), path.data(), &value, sizeof(value)), "reconnect without waiting");
+    ConnectNamedPipe(server, nullptr);
+    const WORD malformed = 42U;
+    WriteFile(server, &malformed, sizeof(malformed), &written, nullptr);
+    Expect(!hardwarescope::ReadMonitoringControl(pending, name.c_str(), path.data(), &value, sizeof(value))
+        && pending == nullptr, "reject truncated control message");
+    if (pending != nullptr) CloseHandle(pending);
+    CloseHandle(server);
+}
+
+void TestVerifiedFileLock() {
+    const auto directory = std::filesystem::temp_directory_path() / (L"HardwareScope-lock-" + std::to_wstring(GetCurrentProcessId()));
+    std::filesystem::create_directory(directory);
+    const auto path = directory / L"installer.bin";
+    { std::ofstream file(path, std::ios::binary); file << "abc"; }
+    hardwarescope::VerifiedFile file;
+    Expect(file.Open(path, 3U, "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD"), "lock exact verified update bytes");
+    const auto writer = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0U, nullptr);
+    Expect(writer == INVALID_HANDLE_VALUE, "verified installer cannot be overwritten before launch");
+    if (writer != INVALID_HANDLE_VALUE) CloseHandle(writer);
+    Expect(!DeleteFileW(path.c_str()), "verified installer cannot be removed before launch");
+    auto moved = path; moved += L".moved";
+    Expect(!MoveFileExW(path.c_str(), moved.c_str(), MOVEFILE_REPLACE_EXISTING), "verified installer cannot be swapped by rename");
+    auto moved_directory = directory; moved_directory += L".moved";
+    Expect(!MoveFileExW(directory.c_str(), moved_directory.c_str(), 0U), "verified installer's staging directory cannot be swapped");
+    file.Close();
+    Expect(DeleteFileW(path.c_str()) != FALSE, "verification lock released for cleanup");
+    std::error_code ignored;
+    std::filesystem::remove(moved, ignored);
+    std::filesystem::remove(directory, ignored);
+}
+
 void BenchmarkSnapshotStore() {
     hardwarescope::SnapshotStore store;
     hardwarescope::SensorSnapshot snapshot{};
@@ -843,6 +907,8 @@ int main() {
     TestUiPalettes();
     TestSensorViewModel();
     TestUpdateManifestAndVerification();
+    TestVerifiedFileLock();
+    TestMonitoringControl();
     TestLegacySettingsMigration();
     TestSensorExplanations();
     BenchmarkSnapshotStore();

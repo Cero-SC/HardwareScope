@@ -56,6 +56,10 @@ Source: "@CMAKE_CURRENT_SOURCE_DIR@/LICENSE.txt"; DestDir: "{app}"; Flags: ignor
 Source: "@CMAKE_CURRENT_SOURCE_DIR@/THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "@CMAKE_CURRENT_SOURCE_DIR@/PRIVACY.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "@CMAKE_CURRENT_SOURCE_DIR@/CODE_SIGNING_POLICY.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDirectory}/resources/PawnIO-Modules-COPYING.txt"; DestDir: "{app}"; Flags: ignoreversion
+#ifndef SmokeTest
+Source: "{#SourceDirectory}/third_party/pawnio/PawnIO_setup.exe"; Flags: dontcopy
+#endif
 
 [Icons]
 #ifdef SmokeTest
@@ -80,12 +84,57 @@ Filename: "{app}\HardwareScopeSensorService.exe"; Parameters: "--uninstall"; Fla
 
 #ifndef SmokeTest
 [Code]
+function PawnIOReady(): Boolean;
+var
+  Version: String;
+  PackedVersion: Int64;
+begin
+  Result := FileExists(ExpandConstant('{autopf}\PawnIO\PawnIOLib.dll')) and
+    RegQueryStringValue(HKLM64, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO', 'DisplayVersion', Version);
+  if Result then
+    Result := StrToVersion(Version, PackedVersion);
+  if Result then
+    Result := ComparePackedVersion(PackedVersion, PackVersionComponents(2, 2, 0, 0)) >= 0;
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ServicePath: String;
   ResultCode: Integer;
+  PawnSetup: String;
 begin
   Result := '';
+  if not PawnIOReady() then
+  begin
+    ExtractTemporaryFile('PawnIO_setup.exe');
+    PawnSetup := ExpandConstant('{tmp}\PawnIO_setup.exe');
+    if CompareText(GetSHA256OfFile(PawnSetup), '1F519A22E47187F70A1379A48CA604981C4FCF694F4E65B734AAA74A9FBA3032') <> 0 then
+    begin
+      Result := 'The bundled hardware-access prerequisite failed verification.';
+      Exit;
+    end;
+    if not Exec(PawnSetup, '-install -silent', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    begin
+      Result := 'Could not start the PawnIO hardware-access installer. HardwareScope was not replaced.';
+      Exit;
+    end;
+    if (ResultCode <> 0) and (ResultCode <> 3010) then
+    begin
+      Result := Format('PawnIO installation failed (code %d). HardwareScope was not replaced.', [ResultCode]);
+      Exit;
+    end;
+    if ResultCode = 3010 then
+    begin
+      NeedsRestart := True;
+      Result := 'PawnIO requires a Windows restart. Restart and run HardwareScope Setup again.';
+      Exit;
+    end;
+    if not PawnIOReady() then
+    begin
+      Result := 'PawnIO installation could not be verified. HardwareScope was not replaced.';
+      Exit;
+    end;
+  end;
   ServicePath := ExpandConstant('{app}\HardwareScopeSensorService.exe');
   if FileExists(ServicePath) then
   begin
@@ -100,6 +149,8 @@ var
 begin
   if CurStep = ssPostInstall then
   begin
+    if (not Exec(ExpandConstant('{app}\HardwareScopeSensorService.exe'), '--check-runtime', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)) or (ResultCode <> 0) then
+      RaiseException('The PawnIO driver could not be opened. Restart Windows and run Setup again to repair hardware sensor access.');
     if (not Exec(ExpandConstant('{app}\HardwareScopeSensorService.exe'), '--install', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)) or (ResultCode <> 0) then
       RaiseException('HardwareScope could not install its read-only sensor service.');
   end;

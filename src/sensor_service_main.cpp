@@ -252,6 +252,10 @@ int UninstallService() noexcept {
 } // namespace
 
 int wmain(const int argument_count, wchar_t** arguments) {
+    if (argument_count == 2 && std::wstring_view{arguments[1]} == L"--check-runtime") {
+        hardwarescope::PawnIoExecutor runtime;
+        return runtime.CheckRuntime() ? 0 : 1;
+    }
     if (argument_count == 2 && std::wstring_view{arguments[1]} == L"--install") return InstallService();
     if (argument_count == 2 && std::wstring_view{arguments[1]} == L"--uninstall") return UninstallService();
     if (argument_count == 3 && std::wstring_view{arguments[1]} == L"--test-ms") {

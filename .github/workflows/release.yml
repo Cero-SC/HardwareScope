@@ -116,6 +116,10 @@ jobs:
             $lines,
             [Text.UTF8Encoding]::new($false))
 
+      - name: Verify clean installation, upgrade, driver access, and uninstall
+        shell: pwsh
+        run: ./tests/clean_install_validation.ps1 -InstallerPath 'out/packages/HardwareScope-Setup-${{ steps.version.outputs.version }}-x64.exe'
+
       - name: Upload release build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -125,6 +129,14 @@ jobs:
             out/packages/HardwareScope-${{ steps.version.outputs.version }}-x64.zip
             out/packages/SHA256SUMS.txt
           if-no-files-found: error
+
+      - name: Keep installer diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-install-diagnostics
+          path: ${{ runner.temp }}/HardwareScope-*.log
+          if-no-files-found: ignore
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2

@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <string_view>
 
 namespace hardwarescope {
@@ -58,6 +59,9 @@ private:
     std::uint32_t requested_fps_target_{};
     std::uint32_t requested_fps_smoothing_{500U};
     std::uint32_t requested_hardware_polling_interval_{750U};
+    std::wstring expected_control_server_;
+    HANDLE pending_control_pipe_{};
+    std::chrono::steady_clock::time_point last_control_request_{};
 };
 
 class SensorBridgeClient final {

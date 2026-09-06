@@ -17,6 +17,7 @@ public:
     PawnIoExecutor& operator=(const PawnIoExecutor&) = delete;
 
     [[nodiscard]] bool LoadModuleFromResource(HINSTANCE resources, int resource_id) noexcept;
+    [[nodiscard]] bool CheckRuntime() noexcept;
     [[nodiscard]] bool Execute(
         const char* function,
         std::span<const std::uint64_t> input,

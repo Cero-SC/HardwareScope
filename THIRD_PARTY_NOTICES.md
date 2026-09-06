@@ -22,6 +22,16 @@ HardwareScope's DIMM provider is intentionally read-only. It does not use the up
 ## PawnIO modules
 
 The full license text accompanying the embedded PawnIO modules is retained in `resources/PawnIO-Modules-COPYING.txt`.
+It is also included in installed and portable packages as `PawnIO-Modules-COPYING.txt`.
+
+## PawnIO official installer 2.2.0
+
+- Unmodified official signed binary from https://github.com/namazso/PawnIO.Setup/releases/tag/2.2.0
+- SHA-256: `1F519A22E47187F70A1379A48CA604981C4FCF694F4E65B734AAA74A9FBA3032`
+- Official binary edition is proprietary; installer redistribution is permitted by
+  https://github.com/namazso/PawnIO.Modules/wiki/Using-PawnIO-Modules .
+- The official installer retains its own terms and installs the shared runtime.
+  HardwareScope's license does not relicense that runtime.
 
 ## PresentMon 2.4.1
 

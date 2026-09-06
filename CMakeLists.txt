@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(HardwareScopeNative VERSION 2.0.11 LANGUAGES CXX RC)
+project(HardwareScopeNative VERSION 2.0.12 LANGUAGES CXX RC)
+
+# Refuse to package an unexpected prerequisite, even in offline/local builds.
+file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pawnio/PawnIO_setup.exe" PAWNIO_SHA256)
+if(NOT PAWNIO_SHA256 STREQUAL "1f519a22e47187f70a1379a48ca604981c4fcf694f4e65b734aaa74a9fba3032")
+    message(FATAL_ERROR "Bundled PawnIO 2.2.0 checksum mismatch")
+endif()
 
 configure_file(installer/HardwareScope.iss.in HardwareScope.iss @ONLY)
 configure_file(resources/HardwareScopeVersion.rc.in HardwareScopeVersion.rc @ONLY)
@@ -19,12 +25,12 @@ add_library(hardwarescope_core STATIC
     src/amd_zen_provider.cpp
     src/app_settings.cpp
     src/ddr5_temperature_provider.cpp
-    src/etw_fps_monitor.cpp
     src/file_verification.cpp
     src/frame_rate_tracker.cpp
     src/game_detector.cpp
     src/graph_model.cpp
     src/legacy_settings_migration.cpp
+    src/monitoring_control.cpp
     src/osd_model.cpp
     src/nvidia_gpu_provider.cpp
     src/nct6687_provider.cpp
@@ -177,6 +183,7 @@ target_link_libraries(HardwareScopeNativeBridgeProbe PRIVATE hardwarescope_core)
 
 add_executable(HardwareScopeNativeFpsProbe
     tests/fps_probe.cpp
+    src/etw_fps_monitor.cpp
 )
 target_link_libraries(HardwareScopeNativeFpsProbe PRIVATE hardwarescope_core)
 
@@ -246,6 +253,9 @@ install(PROGRAMS $<TARGET_FILE:HardwareScopeNativeUpdater> DESTINATION . RENAME 
 install(PROGRAMS $<TARGET_FILE:HardwareScopeNativeSensorService> DESTINATION . RENAME HardwareScopeSensorService.exe)
 install(PROGRAMS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/presentmon/PresentMon-2.4.1-x64.exe" DESTINATION . RENAME PresentMon.exe)
 install(FILES LICENSE.txt THIRD_PARTY_NOTICES.md PRIVACY.md CODE_SIGNING_POLICY.md README.md DESTINATION .)
+install(PROGRAMS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pawnio/PawnIO_setup.exe" DESTINATION prerequisites)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pawnio/README.md" DESTINATION prerequisites)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/resources/PawnIO-Modules-COPYING.txt" DESTINATION .)
 
 set(CPACK_GENERATOR ZIP)
 set(CPACK_PACKAGE_NAME HardwareScope)

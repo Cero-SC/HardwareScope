@@ -13,7 +13,10 @@
 
 ## Process model
 
-The normal application is one native process. PawnIO remains the signed privileged hardware bridge. The updater is a separate native executable that runs only during an update.
+The desktop application runs without elevation. A separate LocalSystem service
+collects privileged sensors using the installed official PawnIO runtime and
+embedded modules. The service starts PresentMon only for requested game capture.
+The updater is a separate native executable that runs only during an update.
 
 ## Data flow
 
@@ -24,7 +27,7 @@ Native providers -> polling coordinator -> local SensorSnapshot
                                              |
                          WM_APP_SNAPSHOT -> Direct2D renderer
 
-Game detector -> native ETW worker ---------^
+Game detector -> control pipe -> service/PresentMon -> shared snapshot -> UI worker
 ```
 
 The worker builds a complete snapshot locally and publishes it in one operation. A
@@ -35,4 +38,14 @@ section over a complex lock-free protocol.
 
 ## Provider boundaries
 
-Each provider will expose discovery, static metadata, polling cadence, and value collection through a narrow native interface. CPU, GPU, storage, memory, motherboard, and FPS providers can fail independently without stopping the UI.
+Providers expose discovery, static metadata, polling cadence, and value collection.
+The experimental direct ETW engine is built only into HardwareScopeNativeFpsProbe;
+it is not a runtime fallback. Production frame analysis uses PresentMon's CSV stream.
+
+The control pipe retains its nonblocking connection between polls. The service
+connects anonymously, checks the server executable against the installed sibling
+HardwareScope.exe, and expires an abandoned FPS request after 15 seconds
+(up to 32 seconds at the slowest hardware polling interval).
+Snapshots older than five seconds are rejected so stopped collection cannot look live.
+These are failure-handling boundaries, not process isolation for every provider:
+a native provider crash can still terminate its hosting process.

@@ -94,6 +94,15 @@ bool PawnIoExecutor::LoadModuleFromResource(const HINSTANCE resources, const int
     return true;
 }
 
+bool PawnIoExecutor::CheckRuntime() noexcept {
+    Close();
+    if (!LoadLibraryFunctions()) return false;
+    last_error_ = open_function_(&executor_);
+    const auto ready = SUCCEEDED(last_error_) && executor_ != nullptr;
+    Close();
+    return ready;
+}
+
 bool PawnIoExecutor::Execute(
     const char* const function,
     const std::span<const std::uint64_t> input,

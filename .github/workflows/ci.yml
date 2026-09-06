@@ -42,3 +42,24 @@ jobs:
 
       - name: Run deterministic tests
         run: ctest --test-dir out/build/x64-release -C Release --output-on-failure
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build and validate clean installer
+        shell: pwsh
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          & $iscc 'out/build/x64-release/HardwareScope.iss'
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with $LASTEXITCODE" }
+          $installer = Get-ChildItem out/packages/HardwareScope-Setup-*-x64.exe
+          if (@($installer).Count -ne 1) { throw 'Expected exactly one installer.' }
+          ./tests/clean_install_validation.ps1 -InstallerPath $installer.FullName
+
+      - name: Keep installer diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clean-install-diagnostics
+          path: ${{ runner.temp }}/HardwareScope-*.log
+          if-no-files-found: ignore

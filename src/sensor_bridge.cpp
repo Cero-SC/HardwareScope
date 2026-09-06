@@ -1,9 +1,11 @@
 #include "hardwarescope/sensor_bridge.hpp"
+#include "hardwarescope/monitoring_control.hpp"
 
 #include <sddl.h>
 
 #include <algorithm>
 #include <cstring>
+#include <filesystem>
 #include <new>
 #include <string>
 #include <type_traits>
@@ -44,6 +46,12 @@ SensorBridgePublisher::~SensorBridgePublisher() {
 
 bool SensorBridgePublisher::Initialize() noexcept {
     Close();
+    try {
+        std::array<wchar_t, 32'768U> module{};
+        const auto length = GetModuleFileNameW(nullptr, module.data(), static_cast<DWORD>(module.size()));
+        if (length == 0U || length >= module.size()) return false;
+        expected_control_server_ = (std::filesystem::path{module.data()}.parent_path() / L"HardwareScope.exe").native();
+    } catch (...) { return false; }
     PSECURITY_DESCRIPTOR descriptor{};
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
             L"D:(A;;GA;;;SY)(A;;GR;;;BA)(A;;GR;;;BU)",
@@ -86,18 +94,20 @@ void SensorBridgePublisher::Publish(const SensorSnapshot& snapshot) noexcept {
 }
 
 void SensorBridgePublisher::PollFpsControl() noexcept {
-    const auto pipe = CreateFileW(kFpsControlPipeName, FILE_READ_DATA, 0U, nullptr, OPEN_EXISTING, 0U, nullptr);
-    if (pipe == INVALID_HANDLE_VALUE) return;
     SharedFpsControl request{};
-    DWORD read{};
-    if (ReadFile(pipe, &request, sizeof(request), &read, nullptr)
-        && read == sizeof(request) && request.magic == kSensorBridgeMagic && request.version == kSensorBridgeVersion) {
+    if (ReadMonitoringControl(pending_control_pipe_, kFpsControlPipeName, expected_control_server_, &request, sizeof(request))
+        && request.magic == kSensorBridgeMagic && request.version == kSensorBridgeVersion) {
         requested_fps_target_ = static_cast<std::uint32_t>(request.target_process_id);
         requested_fps_smoothing_ = std::clamp(static_cast<std::uint32_t>(request.smoothing_milliseconds), 250U, 1'250U);
         requested_hardware_polling_interval_ = std::clamp(
             static_cast<std::uint32_t>(request.hardware_polling_milliseconds), 100U, 10'000U);
+        last_control_request_ = std::chrono::steady_clock::now();
+    } else if (std::chrono::steady_clock::now() - last_control_request_ >
+        std::chrono::milliseconds{std::max(15'000U, requested_hardware_polling_interval_ * 3U + 2'000U)}) {
+        // A crashed/closed UI must not leave the service capturing a game forever.
+        requested_fps_target_ = 0U;
+        requested_hardware_polling_interval_ = 750U;
     }
-    CloseHandle(pipe);
 }
 
 std::uint32_t SensorBridgePublisher::RequestedFpsTarget() noexcept {
@@ -106,16 +116,16 @@ std::uint32_t SensorBridgePublisher::RequestedFpsTarget() noexcept {
 }
 
 std::uint32_t SensorBridgePublisher::RequestedFpsSmoothing() noexcept {
-    PollFpsControl();
     return requested_fps_smoothing_;
 }
 
 std::uint32_t SensorBridgePublisher::RequestedHardwarePollingInterval() noexcept {
-    PollFpsControl();
     return requested_hardware_polling_interval_;
 }
 
 void SensorBridgePublisher::Close() noexcept {
+    if (pending_control_pipe_ != nullptr) CloseHandle(pending_control_pipe_);
+    pending_control_pipe_ = nullptr;
     if (shared_ != nullptr) UnmapViewOfFile(shared_);
     if (mapping_ != nullptr) CloseHandle(mapping_);
     shared_ = nullptr;
@@ -123,6 +133,7 @@ void SensorBridgePublisher::Close() noexcept {
     requested_fps_target_ = 0U;
     requested_fps_smoothing_ = 500U;
     requested_hardware_polling_interval_ = 750U;
+    last_control_request_ = {};
 }
 
 SensorBridgeClient::~SensorBridgeClient() {
@@ -167,7 +178,15 @@ bool SensorBridgeClient::Collect(SensorSnapshot& destination) noexcept {
             break;
         }
     }
-    if (!copied) return false;
+    LARGE_INTEGER now{}, frequency{};
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&frequency);
+    if (!copied || copy.captured_qpc == 0U || frequency.QuadPart <= 0
+        || static_cast<std::uint64_t>(now.QuadPart) < copy.captured_qpc
+        || static_cast<std::uint64_t>(now.QuadPart) - copy.captured_qpc > static_cast<std::uint64_t>(frequency.QuadPart) * 5U) {
+        Close();
+        return false;
+    }
     const auto slots = destination.sensors.size() - std::min<std::size_t>(destination.count, destination.sensors.size());
     const auto count = std::min<std::size_t>(copy.count, slots);
     std::copy_n(copy.sensors.begin(), count, destination.sensors.begin() + destination.count);
@@ -214,8 +233,8 @@ bool SensorBridgeClient::SetFpsTarget(
         SECURITY_ATTRIBUTES attributes{sizeof(attributes), descriptor, FALSE};
         control_pipe_ = CreateNamedPipeW(
             kFpsControlPipeName,
-            PIPE_ACCESS_OUTBOUND,
-            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_NOWAIT,
+            PIPE_ACCESS_OUTBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS,
             1U,
             sizeof(SharedFpsControl),
             sizeof(SharedFpsControl),
@@ -227,8 +246,16 @@ bool SensorBridgeClient::SetFpsTarget(
             return false;
         }
     }
-    const auto connected = ConnectNamedPipe(control_pipe_, nullptr) != FALSE || GetLastError() == ERROR_PIPE_CONNECTED;
-    if (!connected) return GetLastError() == ERROR_PIPE_LISTENING || GetLastError() == ERROR_NO_DATA;
+    auto connected = ConnectNamedPipe(control_pipe_, nullptr) != FALSE || GetLastError() == ERROR_PIPE_CONNECTED;
+    if (!connected && GetLastError() == ERROR_NO_DATA) {
+        static_cast<void>(DisconnectNamedPipe(control_pipe_));
+        connected = ConnectNamedPipe(control_pipe_, nullptr) != FALSE || GetLastError() == ERROR_PIPE_CONNECTED;
+    }
+    if (!connected) {
+        const auto error = GetLastError();
+        if (error == ERROR_NO_DATA) static_cast<void>(DisconnectNamedPipe(control_pipe_));
+        return error == ERROR_PIPE_LISTENING || error == ERROR_NO_DATA;
+    }
     SharedFpsControl request{};
     request.magic = kSensorBridgeMagic;
     request.version = kSensorBridgeVersion;
@@ -237,7 +264,9 @@ bool SensorBridgeClient::SetFpsTarget(
     request.hardware_polling_milliseconds = static_cast<LONG>(std::clamp(hardware_polling_milliseconds, 100U, 10'000U));
     DWORD written{};
     const auto success = WriteFile(control_pipe_, &request, sizeof(request), &written, nullptr) && written == sizeof(request);
-    static_cast<void>(DisconnectNamedPipe(control_pipe_));
+    // Keep queued bytes alive until the service reads and closes its endpoint.
+    // DisconnectNamedPipe immediately after WriteFile discards unread messages.
+    if (!success) static_cast<void>(DisconnectNamedPipe(control_pipe_));
     return success;
 }
 

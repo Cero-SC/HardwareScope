@@ -71,7 +71,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         if (wait != WAIT_OBJECT_0) return 13;
     }
     RelaunchOnFailure recovery{application};
-    if (!hardwarescope::VerifyFileSha256(installer, *size, hash)) return 14;
+    hardwarescope::VerifiedFile verified_installer;
+    if (!verified_installer.Open(installer, *size, hash)) return 14;
 
     SHELLEXECUTEINFOW setup{};
     setup.cbSize = sizeof(setup);
@@ -87,6 +88,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     static_cast<void>(GetExitCodeProcess(setup.hProcess, &setup_exit_code));
     CloseHandle(setup.hProcess);
     if (setup_wait != WAIT_OBJECT_0 || setup_exit_code != ERROR_SUCCESS) return 16;
+    verified_installer.Close();
     static_cast<void>(DeleteFileW(installer.c_str()));
     if (!Relaunch(application)) return 17;
     recovery.dismissed = true;

@@ -47,9 +47,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.release.outputs.tag }}
-          # Publish the repository's canonical path. Current clients also
-          # accept the pre-rename URL so older manifests remain compatible.
-          UPDATE_DOWNLOAD_REPOSITORY: ${{ github.repository }}
+          # Pre-2.0.5 clients only accept this owner. Verify its redirect/download
+          # below; current clients accept both paths. Keep existing users upgradable.
+          UPDATE_DOWNLOAD_REPOSITORY: Aydren1/HardwareScope
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
@@ -72,7 +72,9 @@ jobs:
 
           SIZE="$(stat -c%s "release-assets/$INSTALLER")"
           INSTALLER_URL="https://github.com/${UPDATE_DOWNLOAD_REPOSITORY}/releases/download/${TAG}/${INSTALLER}"
-          curl --fail --location --silent --show-error --range 0-0 --output /dev/null "$INSTALLER_URL"
+          curl --fail --location --silent --show-error --output release-assets/public-installer.exe "$INSTALLER_URL"
+          PUBLIC_HASH="$(sha256sum release-assets/public-installer.exe | awk '{ print toupper($1) }')"
+          test "$PUBLIC_HASH" = "$ACTUAL_HASH"
 
           mkdir -p updates
           printf '%s\n' \

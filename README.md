@@ -71,6 +71,16 @@ firmware, and available vendor interfaces.
 - 64-bit processor
 - Administrator approval during installation
 
+Setup includes the official PawnIO 2.2.0 installer for supported CPU,
+motherboard and DDR5 temperature access. It checks existing installations and
+does not remove the shared driver when HardwareScope is uninstalled.
+Some hardware remains unsupported; installing the driver does not add sensor
+support for every CPU or motherboard.
+
+The portable ZIP includes PawnIO Setup under `prerequisites/`. It requires
+manual prerequisite installation and elevation for direct privileged sensors;
+the full installer is recommended for service-backed monitoring and FPS.
+
 ## Build from source
 
 Prerequisites:

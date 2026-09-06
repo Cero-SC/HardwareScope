@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cstdio>
 #include <vector>
+#include <algorithm>
 
 namespace hardwarescope {
 namespace {
@@ -23,14 +24,44 @@ struct Hash final {
 
 } // namespace
 
-bool VerifyFileSha256(const std::filesystem::path& path, const std::uint64_t expected_size, const std::string_view expected_sha256) noexcept {
+bool VerifiedFile::Open(const std::filesystem::path& path, const std::uint64_t expected_size, const std::string_view expected_sha256) noexcept {
+    Close();
     if (expected_sha256.size() != 64U) return false;
     try {
-        std::error_code error;
-        if (!std::filesystem::is_regular_file(path, error) || error || std::filesystem::file_size(path, error) != expected_size || error) return false;
-        FILE* stream{};
-        if (_wfopen_s(&stream, path.c_str(), L"rb") != 0 || stream == nullptr) return false;
-        struct FileCloser final { FILE* value{}; ~FileCloser() { if (value != nullptr) fclose(value); } } file{stream};
+        // Lock parent names from the volume root down, so moving/replacing the
+        // staging directory cannot redirect ShellExecute after verification.
+        const auto absolute = std::filesystem::absolute(path).lexically_normal();
+        std::vector<std::filesystem::path> parents;
+        for (auto parent = absolute.parent_path(); !parent.empty(); parent = parent.parent_path()) {
+            parents.push_back(parent);
+            if (parent == parent.root_path()) break;
+        }
+        struct Directories final {
+            std::vector<HANDLE> handles;
+            ~Directories() { for (const auto handle : handles) CloseHandle(handle); }
+        } directories;
+        directories.handles.reserve(parents.size());
+        for (auto parent = parents.rbegin(); parent != parents.rend(); ++parent) {
+            const auto directory = CreateFileW(parent->c_str(), FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+            if (directory == INVALID_HANDLE_VALUE) return false;
+            directories.handles.push_back(directory);
+            BY_HANDLE_FILE_INFORMATION info{};
+            if (!GetFileInformationByHandle(directory, &info)
+                || (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U) return false;
+        }
+        const auto handle = CreateFileW(absolute.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+            OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) return false;
+        struct FileCloser final { HANDLE value; ~FileCloser() { if (value != INVALID_HANDLE_VALUE) CloseHandle(value); } } file{handle};
+        BY_HANDLE_FILE_INFORMATION information{};
+        LARGE_INTEGER size{};
+        if (!GetFileInformationByHandle(handle, &information)
+            || (information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0U
+            || GetFileType(handle) != FILE_TYPE_DISK
+            || !GetFileSizeEx(handle, &size) || size.QuadPart < 0
+            || static_cast<std::uint64_t>(size.QuadPart) != expected_size) return false;
 
         Algorithm algorithm{};
         if (BCryptOpenAlgorithmProvider(&algorithm.value, BCRYPT_SHA256_ALGORITHM, nullptr, 0U) < 0) return false;
@@ -42,10 +73,10 @@ bool VerifyFileSha256(const std::filesystem::path& path, const std::uint64_t exp
         if (BCryptCreateHash(algorithm.value, &hash.value, object.data(), static_cast<ULONG>(object.size()), nullptr, 0U, 0U) < 0) return false;
         std::array<UCHAR, 64U * 1024U> buffer{};
         for (;;) {
-            const auto read = fread(buffer.data(), 1U, buffer.size(), stream);
+            DWORD read{};
+            if (!ReadFile(handle, buffer.data(), static_cast<DWORD>(buffer.size()), &read, nullptr)) return false;
             if (read > 0U && BCryptHashData(hash.value, buffer.data(), static_cast<ULONG>(read), 0U) < 0) return false;
             if (read < buffer.size()) {
-                if (ferror(stream) != 0) return false;
                 break;
             }
         }
@@ -60,10 +91,18 @@ bool VerifyFileSha256(const std::filesystem::path& path, const std::uint64_t exp
         for (std::size_t index = 0U; index < actual.size(); ++index) {
             if (actual[index] != static_cast<char>(std::toupper(static_cast<unsigned char>(expected_sha256[index])))) return false;
         }
+        file_ = handle;
+        file.value = INVALID_HANDLE_VALUE;
+        directories_ = std::move(directories.handles);
         return true;
     } catch (...) {
         return false;
     }
+}
+
+bool VerifyFileSha256(const std::filesystem::path& path, const std::uint64_t expected_size, const std::string_view expected_sha256) noexcept {
+    VerifiedFile file;
+    return file.Open(path, expected_size, expected_sha256);
 }
 
 } // namespace hardwarescope
