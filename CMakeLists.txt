@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(HardwareScopeNative VERSION 2.0.13 LANGUAGES CXX RC)
+project(HardwareScopeNative VERSION 2.0.14 LANGUAGES CXX RC)
 
 # Refuse to package an unexpected prerequisite, even in offline/local builds.
 file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pawnio/PawnIO_setup.exe" PAWNIO_SHA256)
@@ -244,8 +244,11 @@ include(CTest)
 if(BUILD_TESTING)
     add_test(NAME HardwareScopeNative.Core COMMAND HardwareScopeNativeTests)
     add_test(NAME HardwareScopeNative.UpdaterRecovery COMMAND HardwareScopeNativeUpdaterRecoveryTests)
+    # Prefer pwsh on hosted runners: launching Windows PowerShell from pwsh can
+    # inherit an incompatible PSModulePath and hide built-in hashing commands.
+    find_program(HARDWARESCOPE_TEST_POWERSHELL NAMES pwsh powershell REQUIRED)
     add_test(NAME HardwareScopeNative.ReleaseEvidence
-        COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/release_evidence_tests.ps1")
+        COMMAND "${HARDWARESCOPE_TEST_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/release_evidence_tests.ps1")
 endif()
 
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT HardwareScopeNative)
