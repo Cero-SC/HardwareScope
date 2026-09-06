@@ -59,13 +59,15 @@ if ($LASTEXITCODE -ne 0) {
     throw "The updated sensor service could not be installed (exit code $LASTEXITCODE)."
 }
 
-$desktop = [Environment]::GetFolderPath([Environment+SpecialFolder]::DesktopDirectory)
+# Match the elevated installer's {autodesktop}; a personal shortcut appears
+# alongside this shared shortcut and creates a duplicate on the user's desktop.
+$desktop = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonDesktopDirectory)
 $shortcutPath = Join-Path $desktop 'HardwareScope.lnk'
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
 $shortcut.TargetPath = $appPath
 $shortcut.WorkingDirectory = $installDirectory
-$shortcut.IconLocation = "$appPath,0"
+$shortcut.IconLocation = "$(Join-Path $installDirectory 'HardwareScope.ico'),0"
 $shortcut.Description = 'HardwareScope 2.0 native hardware monitoring'
 $shortcut.Save()
 [Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcut) | Out-Null
