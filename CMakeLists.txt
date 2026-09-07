@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(HardwareScopeNative VERSION 2.0.14 LANGUAGES CXX RC)
+project(HardwareScopeNative VERSION 2.0.15 LANGUAGES CXX RC)
 
 # Refuse to package an unexpected prerequisite, even in offline/local builds.
 file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pawnio/PawnIO_setup.exe" PAWNIO_SHA256)
