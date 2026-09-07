@@ -12,7 +12,12 @@
 namespace hardwarescope {
 namespace {
 
+#if defined(HARDWARESCOPE_ISOLATED_FPS_PROBE)
+// Separate diagnostic binary only. Never touch the installed service's session.
+const std::wstring kSessionName = L"HardwareScopeQualification-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
+#else
 constexpr wchar_t kSessionName[] = L"HardwareScopePresentMon";
+#endif
 constexpr std::wstring_view kLegacySessionPrefix = L"HardwareScopeNativeFPS-";
 constexpr ULONG kTraceQueryCapacity = 64U;
 constexpr std::size_t kTraceTextCharacters = 1'024U;
@@ -199,7 +204,20 @@ void PresentMonFpsRunner::SetTarget(const std::uint32_t process_id, const std::u
     smoothing_milliseconds_.store(std::clamp(smoothing_milliseconds, 250U, 1'250U), std::memory_order_release);
     if (process_id == target_process_id_.load(std::memory_order_acquire)) {
         if (process_id == 0U) return;
-        if (process_ != nullptr && WaitForSingleObject(process_, 0U) == WAIT_TIMEOUT) return;
+        if (process_ != nullptr && WaitForSingleObject(process_, 0U) == WAIT_TIMEOUT) {
+            // The service calls SetTarget on its existing collection loop.
+            // Deliver partial ETW buffers instead of waiting for the default
+            // whole-second real-time flush. Never flush another session.
+            const auto now = GetTickCount64();
+            if (now >= next_flush_tick_) {
+                TraceStorage storage{};
+                auto* properties = InitializeTraceStorage(storage);
+                const auto* session = std::wstring_view{kSessionName}.data();
+                const auto result = ControlTraceW(0U, session, properties, EVENT_TRACE_CONTROL_FLUSH);
+                next_flush_tick_ = GetTickCount64() + (result == ERROR_SUCCESS || result == ERROR_WMI_INSTANCE_NOT_FOUND ? 100U : 5'000U);
+            }
+            return;
+        }
         if (GetTickCount64() < next_start_attempt_tick_) return;
     }
     Stop();
@@ -328,6 +346,8 @@ void PresentMonFpsRunner::RecordInterval(const double milliseconds, const std::u
         interval_first_ = interval_count_ = 0U;
         interval_total_ = 0.0;
         cached_one_percent_low_ = 0U;
+        cached_low_frame_qpc_ = 0U;
+        cached_low_interval_count_ = 0U;
         last_percentile_tick_ = 0U;
     }
     if (interval_count_ == intervals_.size()) {
@@ -372,6 +392,7 @@ PresentMonFpsReading PresentMonFpsRunner::Snapshot() const noexcept {
         reading.frames_per_second = static_cast<std::uint32_t>(std::clamp(
             std::llround(1'000.0 * static_cast<double>(smoothing_count) / smoothing_total), 1LL, 9'999LL));
         reading.frame_time_milliseconds = intervals_[(interval_first_ + interval_count_ - 1U) % intervals_.size()];
+        reading.frame_qpc = last_frame_qpc_;
         reading.one_percent_low_frames_per_second = cached_one_percent_low_;
         reading.process_id = target;
         reading.application = application_;
@@ -387,8 +408,12 @@ PresentMonFpsReading PresentMonFpsRunner::Snapshot() const noexcept {
             // and result publication with stream resets, not only PID changes.
             const auto low = CalculateOnePercentLowFps(percentile_scratch_.data(), percentile_count);
             cached_one_percent_low_ = low;
+            cached_low_frame_qpc_ = last_frame_qpc_;
+            cached_low_interval_count_ = percentile_count;
             reading.one_percent_low_frames_per_second = low;
         }
+        reading.low_frame_qpc = cached_low_frame_qpc_;
+        reading.low_interval_count = cached_low_interval_count_;
     }
     return reading;
 }
@@ -415,12 +440,19 @@ void PresentMonFpsRunner::Stop() noexcept {
     interval_count_ = 0U;
     interval_total_ = 0.0;
     last_frame_tick_ = 0U;
+    last_frame_qpc_ = 0U;
+    next_flush_tick_ = 0U;
     last_percentile_tick_ = 0U;
     cached_one_percent_low_ = 0U;
+    cached_low_frame_qpc_ = 0U;
+    cached_low_interval_count_ = 0U;
     application_ = {};
 }
 
 void PresentMonFpsRunner::CleanupOrphanedSessions() noexcept {
+#if defined(HARDWARESCOPE_ISOLATED_FPS_PROBE)
+    return; // The unique probe session has no previous owner to clean up.
+#else
     std::array<TraceStorage, kTraceQueryCapacity> storage{};
     std::array<EVENT_TRACE_PROPERTIES*, kTraceQueryCapacity> properties{};
     for (std::size_t index{}; index < storage.size(); ++index) {
@@ -439,6 +471,7 @@ void PresentMonFpsRunner::CleanupOrphanedSessions() noexcept {
         const std::wstring_view value{name};
         if (value == kSessionName || value.starts_with(kLegacySessionPrefix)) StopTraceSession(value);
     }
+#endif
 }
 
 } // namespace hardwarescope

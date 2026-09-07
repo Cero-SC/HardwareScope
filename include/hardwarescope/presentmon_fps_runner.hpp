@@ -44,6 +44,9 @@ struct PresentMonFpsReading final {
     std::uint32_t frames_per_second{};
     std::uint32_t one_percent_low_frames_per_second{};
     double frame_time_milliseconds{};
+    std::uint64_t frame_qpc{};
+    std::uint64_t low_frame_qpc{};
+    std::size_t low_interval_count{};
     std::uint32_t process_id{};
     std::array<wchar_t, 64U> application{};
 };
@@ -74,6 +77,7 @@ private:
     std::atomic<std::uint32_t> target_process_id_{};
     std::atomic<std::uint32_t> smoothing_milliseconds_{500U};
     ULONGLONG next_start_attempt_tick_{};
+    ULONGLONG next_flush_tick_{};
     static constexpr std::size_t kMaximumIntervals = 16'384U;
     static constexpr double kHistoryMilliseconds = 60'000.0;
 
@@ -85,6 +89,8 @@ private:
     std::uint64_t last_frame_qpc_{};
     mutable ULONGLONG last_percentile_tick_{};
     mutable std::uint32_t cached_one_percent_low_{};
+    mutable std::uint64_t cached_low_frame_qpc_{};
+    mutable std::size_t cached_low_interval_count_{};
     mutable std::array<double, kMaximumIntervals> percentile_scratch_{};
     std::array<wchar_t, 64U> application_{};
 };

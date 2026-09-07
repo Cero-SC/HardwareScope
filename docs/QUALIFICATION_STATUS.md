@@ -81,6 +81,78 @@ used for freshness because CPU work for a genuine long frame can start earlier.
 
 ## Remaining qualification
 
+### Live CS2 follow-up: issue found, not fully passed
+
+The September 6 22:36 local-time isolated 90-second run used the latest
+capture/parser/statistics and OSD renderer in `HardwareScopeLiveFpsOsdProbe`.
+The installed app and sensor service were stopped. The probe uses a private
+ETW session and is not packaged; service IPC/worker scheduling were bypassed.
+CS2 was visually confirmed at its main menu, with the temporary FPS and 1% low
+overlay visible and no installed monitoring overlay. No game settings changed.
+
+- 824 samples; FPS available in 795, lows in 755; zero OSD text/value mismatches.
+- First FPS at 2.187 seconds; first 1% low at 4.359 seconds. Low warm-up is
+  intentional until at least 100 accepted intervals exist.
+- Nine unavailable samples after startup, in three brief episodes around
+  9.7, 28.1 and 71.6 seconds. Raw events continued: maximum presentation gap
+  was 83.229 ms. Thus these were not multi-second rendering pauses in CS2.
+- Latest frame-time values changed about once per second (mean 1008 ms,
+  observed 907-1109 ms), despite roughly 100 ms probe snapshot polling.
+- Final smoothed FPS independently recalculated to 136, matching the probe.
+  Final displayed low was 45; raw 60-second-history calculation gave 39.
+  History resets after freshness gaps mean these populations differ; this is
+  not yet evidence of an arithmetic error. Delivery/freshness interaction needs
+  investigation before declaring low statistics reliable through those gaps.
+- Probe and its PresentMon child exited; empty OSD cleared. Installed monitoring
+  was left stopped at the user's request. CS2 remained running.
+
+The original probe printed a component-path PASS because it checked availability
+counts, output formatting and cleanup, not continuity. Manual evidence review
+overrides that as a **full FPS qualification failure**. The harness now counts
+post-start unavailability as failure for continuous-render tests; raw-event
+analysis remains necessary to distinguish actual game pauses. No shipping FPS
+behavior was changed to conceal these findings.
+
+Local evidence: `out/qualification/cs2-isolated-20260906-223622/`.
+Readings SHA-256: `E35A6B7890CC167F34FCE95ED6214DB4BF1F0B8D5FB97B4AC09E840B147B9DA2`.
+Raw CSV SHA-256: `3902334023BF11342A6A81C5A6884E66904288A075E6F372E64FFD5CC09A4E84`.
+
+### Delivery correction and repeat test: passed within scope
+
+The subsequent 22:43 isolated CS2 run fixed the delivery problem without
+weakening the 2.5-second stale-frame guard or substituting receipt time for
+presentation time. `SetTarget`, already called by the service's collection
+loop, now flushes only its own live ETW session at most once per 100 ms. There
+is no additional worker thread; failed non-startup flush requests back off to
+five seconds. No flush occurs with FPS disabled or a stopped child process.
+
+Why: the bundled [PresentMon output code](https://raw.githubusercontent.com/GameTechDev/PresentMon/v2.4.1/PresentMon/CsvOutput.cpp)
+already flushes stdout per row; its [trace configuration](https://raw.githubusercontent.com/GameTechDev/PresentMon/v2.4.1/PresentData/PresentMonTraceSession.cpp)
+does not request subsecond buffer delivery. The correction uses Microsoft's
+documented [session flush operation](https://learn.microsoft.com/en-us/windows/win32/api/evntrace/nf-evntrace-controltracew).
+The measured latency improvement supports trace buffering as the cause of the
+observed freshness failures; the PresentMon executable itself is unchanged.
+
+- 90 seconds, 4,076 valid raw presentation intervals, 821 available FPS samples.
+- Zero post-start dropouts and zero OSD text/value mismatches.
+- All 821 smoothed FPS comparisons and 81 distinct cached low calculations
+  matched independent raw-frame calculations using recorded QPC boundaries and
+  actual low-history counts. The once-per-second low cache is respected.
+- Average new-frame update spacing 114.47 ms (previously 1007.54 ms); maximum
+  235 ms. Average event age 245.41 ms; maximum 546.69 ms.
+- First available FPS at 422 ms rather than 2187 ms in the failing run.
+- Probe stopped cleanly, cleared its OSD and left no PresentMon child running.
+- The installed service remained stopped. This was CS2 menu/background rendering,
+  not a played match, full service IPC integration or aggregate resource benchmark.
+
+Evidence: `out/qualification/cs2-flush-20260906-224358/`. The repeatable validator is
+`tests/validate_live_fps_capture.ps1` (PowerShell 7); when analyzing on another host,
+pass the capture host's QPC frequency with `-QpcFrequency` (10,000,000 here).
+The probe records the presentation/low-cache boundaries, not just rounded text,
+so comparisons do not accidentally mix different rolling windows.
+
+### Other open checks
+
 - Real-game capture (including CS2), swap-chain transitions, stalls and FPS/1%
   low agreement against recorded intervals; live ETW permissions and recovery.
 - Model-specific physical sensor/reference checks and multi-GPU identity.

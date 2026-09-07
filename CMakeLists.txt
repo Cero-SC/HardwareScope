@@ -111,6 +111,21 @@ add_executable(HardwareScopeNativeTests
 )
 target_link_libraries(HardwareScopeNativeTests PRIVATE hardwarescope_core)
 
+# Manual live test only: same capture/math/renderer, isolated ETW session. Never
+# package this probe or run it in CTest (requires a user-approved running game).
+add_executable(HardwareScopeLiveFpsOsdProbe
+    tests/live_fps_osd_probe.cpp
+    src/presentmon_fps_runner.cpp
+    src/osd_window.cpp
+)
+target_compile_definitions(HardwareScopeLiveFpsOsdProbe PRIVATE HARDWARESCOPE_ISOLATED_FPS_PROBE=1)
+target_compile_options(HardwareScopeLiveFpsOsdProbe PRIVATE /W4 /WX /permissive- /utf-8 /EHsc)
+target_link_libraries(HardwareScopeLiveFpsOsdProbe PRIVATE hardwarescope_core gdi32 user32 shcore)
+add_custom_command(TARGET HardwareScopeLiveFpsOsdProbe POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/presentmon/PresentMon-2.4.1-x64.exe"
+        "$<TARGET_FILE_DIR:HardwareScopeLiveFpsOsdProbe>/PresentMon.exe")
+
 add_executable(HardwareScopeNativeUiSmokeTests
     tests/ui_smoke_tests.cpp
 )
